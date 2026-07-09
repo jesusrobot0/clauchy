@@ -52,8 +52,10 @@ func (c *Cache) Read(name string) ([]byte, error) {
 // Write atomically replaces (or creates) the named entry with b.
 // It creates a temp file in the same directory as the target so that
 // os.Rename is guaranteed to be atomic (same filesystem, no cross-device move).
+// The cache directory is created with mode 0700 (owner-only) as defense-in-depth;
+// temp files are created via os.CreateTemp which defaults to mode 0600.
 func (c *Cache) Write(name string, b []byte) error {
-	if err := os.MkdirAll(c.dir, 0o755); err != nil {
+	if err := os.MkdirAll(c.dir, 0o700); err != nil {
 		return fmt.Errorf("cache mkdir: %w", err)
 	}
 
@@ -86,16 +88,21 @@ func (c *Cache) Write(name string, b []byte) error {
 // cannot be acquired within timeout, ErrLockTimeout is returned without calling
 // fn. The poll interval is 10 ms.
 //
+// The cache directory is created with mode 0700 and lock files with mode 0600
+// as defense-in-depth — even though lock files contain no secret material,
+// restricting them to the owner prevents other users from acquiring or
+// manipulating the lock on a shared system.
+//
 // Linux flock is process-local and NOT re-entrant: the same process calling
 // WithLock on the same file twice will self-deadlock. Only one layer of the
 // call stack must hold any given lock name at a time.
 func (c *Cache) WithLock(name string, timeout time.Duration, fn func() error) error {
-	if err := os.MkdirAll(c.dir, 0o755); err != nil {
+	if err := os.MkdirAll(c.dir, 0o700); err != nil {
 		return fmt.Errorf("cache mkdir for lock: %w", err)
 	}
 
 	lockPath := filepath.Join(c.dir, name)
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o666)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("cache open lock file: %w", err)
 	}

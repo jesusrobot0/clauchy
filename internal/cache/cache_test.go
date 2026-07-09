@@ -2,6 +2,8 @@ package cache_test
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -116,6 +118,54 @@ func TestWithLockSerializesGoroutines(t *testing.T) {
 
 	if len(seq) != 3 || seq[0] != 1 || seq[1] != 2 || seq[2] != 3 {
 		t.Errorf("WithLock did not serialize goroutines: got %v, want [1 2 3]", seq)
+	}
+}
+
+// ─── Fix 6b: cache dir 0700, lock files 0600 ──────────────────────────────────
+
+func TestWrite_DirMode0700(t *testing.T) {
+	t.Parallel()
+
+	// Use a subdirectory so we can check its mode after Write creates it.
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "clauchy-cache")
+	c := cache.New(dir)
+
+	if err := c.Write("test.json", []byte(`{}`)); err != nil {
+		t.Fatalf("Write() error: %v", err)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("Stat() error: %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Errorf("cache dir mode = 0%o, want 0700", info.Mode().Perm())
+	}
+}
+
+func TestWithLock_LockFileMode0600(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "clauchy-lock")
+	c := cache.New(dir)
+
+	var lockFilePath string
+	_ = c.WithLock(".test.lock", 3*time.Second, func() error {
+		lockFilePath = filepath.Join(dir, ".test.lock")
+		return nil
+	})
+
+	if lockFilePath == "" {
+		t.Fatal("lock fn was not called")
+	}
+	info, err := os.Stat(lockFilePath)
+	if err != nil {
+		t.Fatalf("Stat(%q): %v", lockFilePath, err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("lock file mode = 0%o, want 0600", info.Mode().Perm())
 	}
 }
 
