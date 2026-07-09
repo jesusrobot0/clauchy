@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"clauchy/internal/cache"
-	"clauchy/internal/limits"
-	"clauchy/internal/oauth"
+	"github.com/jesusrobot0/clauchy/internal/cache"
+	"github.com/jesusrobot0/clauchy/internal/limits"
+	"github.com/jesusrobot0/clauchy/internal/oauth"
 )
 
 // cached is a thin wrapper around limits.Cached that passes the test-friendly

@@ -280,7 +280,7 @@ func doRefresh(cfg Config, h *http.Client, now time.Time, creds Credentials) (st
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-	req.Header.Set("User-Agent", "clauchy/1.0")
+	req.Header.Set("User-Agent", "github.com/jesusrobot0/clauchy/1.0")
 
 	resp, err := h.Do(req)
 	if err != nil {

@@ -21,9 +21,9 @@ import (
 	"strings"
 	"time"
 
-	"clauchy/internal/limits"
-	"clauchy/internal/oauth"
-	"clauchy/internal/severity"
+	"github.com/jesusrobot0/clauchy/internal/limits"
+	"github.com/jesusrobot0/clauchy/internal/oauth"
+	"github.com/jesusrobot0/clauchy/internal/severity"
 )
 
 // Output is the JSON payload for a Waybar custom module with return-type: json.

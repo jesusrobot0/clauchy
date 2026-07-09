@@ -16,10 +16,10 @@ import (
 	"github.com/charmbracelet/x/exp/teatest"
 	"github.com/muesli/termenv"
 
-	"clauchy/internal/limits"
-	"clauchy/internal/transcript"
-	"clauchy/ui/dashboard"
-	"clauchy/ui/theme"
+	"github.com/jesusrobot0/clauchy/internal/limits"
+	"github.com/jesusrobot0/clauchy/internal/transcript"
+	"github.com/jesusrobot0/clauchy/ui/dashboard"
+	"github.com/jesusrobot0/clauchy/ui/theme"
 )
 
 // TestMain pins the Lipgloss color profile to TrueColor so golden files are

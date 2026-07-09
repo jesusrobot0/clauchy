@@ -30,7 +30,7 @@ import (
 	"sort"
 	"time"
 
-	"clauchy/internal/pricing"
+	"github.com/jesusrobot0/clauchy/internal/pricing"
 )
 
 // ── Public types ──────────────────────────────────────────────────────────────

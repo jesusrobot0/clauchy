@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"clauchy/internal/cache"
+	"github.com/jesusrobot0/clauchy/internal/cache"
 )
 
 func TestReadWriteRoundTrip(t *testing.T) {

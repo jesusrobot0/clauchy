@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"clauchy/internal/install"
+	"github.com/jesusrobot0/clauchy/internal/install"
 )
 
 // noopReloader is a Reloader that does nothing (replaces real SIGUSR2 in tests).

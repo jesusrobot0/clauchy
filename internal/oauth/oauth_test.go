@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"clauchy/internal/oauth"
+	"github.com/jesusrobot0/clauchy/internal/oauth"
 )
 
 // ----- fixtures & helpers -----

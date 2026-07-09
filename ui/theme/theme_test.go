@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"clauchy/internal/install"
-	"clauchy/internal/severity"
-	"clauchy/ui/theme"
+	"github.com/jesusrobot0/clauchy/internal/install"
+	"github.com/jesusrobot0/clauchy/internal/severity"
+	"github.com/jesusrobot0/clauchy/ui/theme"
 )
 
 func TestDefault_HasDistinctHexPerSeverity(t *testing.T) {

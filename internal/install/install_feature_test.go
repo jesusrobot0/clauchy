@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"clauchy/internal/install"
+	"github.com/jesusrobot0/clauchy/internal/install"
 )
 
 // ─── helpers ─────────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"clauchy/internal/pricing"
+	"github.com/jesusrobot0/clauchy/internal/pricing"
 )
 
 // TestPricingDate asserts that the embedded pricing date matches the design specification.

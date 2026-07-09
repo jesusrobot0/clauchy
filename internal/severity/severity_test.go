@@ -3,7 +3,7 @@ package severity_test
 import (
 	"testing"
 
-	"clauchy/internal/severity"
+	"github.com/jesusrobot0/clauchy/internal/severity"
 )
 
 func TestClassify(t *testing.T) {

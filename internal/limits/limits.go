@@ -33,8 +33,8 @@ import (
 	"time"
 	"unicode"
 
-	"clauchy/internal/cache"
-	"clauchy/internal/oauth"
+	"github.com/jesusrobot0/clauchy/internal/cache"
+	"github.com/jesusrobot0/clauchy/internal/oauth"
 )
 
 // Sentinel errors.

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"clauchy/internal/limits"
-	"clauchy/internal/oauth"
-	"clauchy/ui/waybar"
+	"github.com/jesusrobot0/clauchy/internal/limits"
+	"github.com/jesusrobot0/clauchy/internal/oauth"
+	"github.com/jesusrobot0/clauchy/ui/waybar"
 )
 
 var (

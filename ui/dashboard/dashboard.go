@@ -22,10 +22,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"clauchy/internal/limits"
-	"clauchy/internal/severity"
-	"clauchy/internal/transcript"
-	"clauchy/ui/theme"
+	"github.com/jesusrobot0/clauchy/internal/limits"
+	"github.com/jesusrobot0/clauchy/internal/severity"
+	"github.com/jesusrobot0/clauchy/internal/transcript"
+	"github.com/jesusrobot0/clauchy/ui/theme"
 )
 
 // ─── Deps & message types ─────────────────────────────────────────────────────

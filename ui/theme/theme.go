@@ -10,7 +10,7 @@
 // test-only import of internal/install in theme_test.go.
 package theme
 
-import "clauchy/internal/severity"
+import "github.com/jesusrobot0/clauchy/internal/severity"
 
 // Palette holds the complete visual configuration for clauchy's renderers.
 // All fields are unexported; callers use the accessor methods.

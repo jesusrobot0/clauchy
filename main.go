@@ -34,17 +34,17 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"clauchy/internal/cache"
-	"clauchy/internal/limits"
-	"clauchy/internal/oauth"
-	"clauchy/internal/paths"
-	"clauchy/internal/pricing"
-	"clauchy/internal/transcript"
-	"clauchy/ui/dashboard"
-	"clauchy/ui/theme"
-	"clauchy/ui/waybar"
+	"github.com/jesusrobot0/clauchy/internal/cache"
+	"github.com/jesusrobot0/clauchy/internal/limits"
+	"github.com/jesusrobot0/clauchy/internal/oauth"
+	"github.com/jesusrobot0/clauchy/internal/paths"
+	"github.com/jesusrobot0/clauchy/internal/pricing"
+	"github.com/jesusrobot0/clauchy/internal/transcript"
+	"github.com/jesusrobot0/clauchy/ui/dashboard"
+	"github.com/jesusrobot0/clauchy/ui/theme"
+	"github.com/jesusrobot0/clauchy/ui/waybar"
 
-	"clauchy/internal/install"
+	"github.com/jesusrobot0/clauchy/internal/install"
 )
 
 // version is set by the build system via:

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"clauchy/internal/paths"
+	"github.com/jesusrobot0/clauchy/internal/paths"
 )
 
 // Tests that use t.Setenv cannot call t.Parallel() in Go 1.21+.

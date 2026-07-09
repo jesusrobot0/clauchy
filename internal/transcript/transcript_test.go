@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"clauchy/internal/pricing"
-	"clauchy/internal/transcript"
+	"github.com/jesusrobot0/clauchy/internal/pricing"
+	"github.com/jesusrobot0/clauchy/internal/transcript"
 )
 
 // fixedNow is a deterministic "now" used in all transcript tests.

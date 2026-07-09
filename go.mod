@@ -1,4 +1,4 @@
-module clauchy
+module github.com/jesusrobot0/clauchy
 
 go 1.26.4
 
