@@ -73,10 +73,10 @@ type TickMsg time.Time
 type AnimTickMsg struct{}
 
 // SyncPulseMinFrames is the minimum number of animation frames the header
-// animation stays alive after a sync starts (10 frames x 150ms = 1.5s), so
+// animation stays alive after a sync starts (13 frames x 150ms ≈ 2s), so
 // even an instant cache-hit sync reads as a deliberate gesture, not a flicker.
 // Exported so tests exhaust the pulse without hardcoding the value.
-const SyncPulseMinFrames = 10
+const SyncPulseMinFrames = 13
 
 const tickInterval = 5 * time.Second
 const animTickInterval = 150 * time.Millisecond
@@ -96,7 +96,7 @@ type Model struct {
 	frame         int // animation frame counter, incremented by each AnimTickMsg
 
 	// syncPulseFrames is a countdown that keeps the header animation alive for
-	// at least ~1.5s (SyncPulseMinFrames × 150ms) after a sync starts. Set to SyncPulseMinFrames
+	// at least ~2s (SyncPulseMinFrames × 150ms) after a sync starts. Set to SyncPulseMinFrames
 	// whenever a fetch is issued; decremented on each AnimTickMsg; animation
 	// is active while loadingLimits || loadingStats || syncPulseFrames > 0.
 	// This prevents an ugly single-frame flicker when a cache hit resolves
