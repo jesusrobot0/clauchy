@@ -33,6 +33,15 @@ type Paths struct {
 	// WaybarStyle is the sibling style.css of WaybarConfig.
 	WaybarStyle string
 
+	// DataHome is $XDG_DATA_HOME (or ~/.local/share). The install package writes
+	// SVG icon variants to DataHome/clauchy/.
+	DataHome string
+
+	// HyprlandConf is the path to ~/.config/hypr/hyprland.conf.
+	// It is set only when that file exists on disk; empty otherwise (non-Hyprland
+	// setup). Install checks the path and skips gracefully when empty.
+	HyprlandConf string
+
 	// TranscriptRoots is the ordered list of directories in which clauchy
 	// searches for Claude session JSONL files.
 	TranscriptRoots []string
@@ -45,22 +54,35 @@ type Paths struct {
 //  3. If XDG_CONFIG_HOME is also unset/empty: $HOME/.claude/projects.
 //
 // Credentials file uses existence-gating across ALL tiers in priority order.
+//
+// HyprlandConf is set only when ~/.config/hypr/hyprland.conf exists on disk.
+// DataHome is $XDG_DATA_HOME or ~/.local/share.
 func Resolve() (Paths, error) {
 	home := os.Getenv("HOME")
 	configHome := xdgConfigHome(home)
 	cacheHome := xdgCacheHome(home)
+	dataHome := xdgDataHome(home)
 
 	p := Paths{
 		CacheDir:        filepath.Join(cacheHome, "clauchy"),
 		PricingOverride: filepath.Join(configHome, "clauchy", "pricing.json"),
 		WaybarConfig:    filepath.Join(configHome, "waybar", "config.jsonc"),
 		WaybarStyle:     filepath.Join(configHome, "waybar", "style.css"),
+		DataHome:        dataHome,
+	}
+
+	// HyprlandConf: only set when the file exists (non-Hyprland setups have no
+	// hyprland.conf; install skips gracefully when this field is empty).
+	hyprConf := filepath.Join(configHome, "hypr", "hyprland.conf")
+	if _, err := os.Stat(hyprConf); err == nil {
+		p.HyprlandConf = hyprConf
 	}
 
 	claudeConfigDir := os.Getenv("CLAUDE_CONFIG_DIR")
 
 	if claudeConfigDir != "" {
 		// CLAUDE_CONFIG_DIR: comma-split; each entry contributes a transcript root.
+		// Whitespace-only entries are ignored; only non-blank entries are used.
 		for _, entry := range strings.Split(claudeConfigDir, ",") {
 			entry = strings.TrimSpace(entry)
 			if entry == "" {
@@ -68,12 +90,28 @@ func Resolve() (Paths, error) {
 			}
 			p.TranscriptRoots = append(p.TranscriptRoots, filepath.Join(entry, "projects"))
 		}
-	} else if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		// XDG fallback: $XDG_CONFIG_HOME/claude/projects.
-		p.TranscriptRoots = append(p.TranscriptRoots, filepath.Join(xdg, "claude", "projects"))
-	} else {
-		// Home fallback: ~/.claude/projects.
-		p.TranscriptRoots = append(p.TranscriptRoots, filepath.Join(home, ".claude", "projects"))
+	}
+
+	if len(p.TranscriptRoots) == 0 {
+		// CLAUDE_CONFIG_DIR was empty/unset OR contained only whitespace entries
+		// that all got filtered out. Fall through to XDG/home tiers.
+		//
+		// Existence-gate the XDG tier: only select it when
+		// $XDG_CONFIG_HOME/claude/projects actually EXISTS. This prevents
+		// returning ~/.config/claude/projects when ~/.claude/projects has files.
+		xdgAdded := false
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			candidate := filepath.Join(xdg, "claude", "projects")
+			if _, err := os.Stat(candidate); err == nil {
+				p.TranscriptRoots = append(p.TranscriptRoots, candidate)
+				xdgAdded = true
+			}
+		}
+		if !xdgAdded {
+			// Home fallback: always returned (whether or not it exists yet),
+			// consistent with credential default behavior.
+			p.TranscriptRoots = append(p.TranscriptRoots, filepath.Join(home, ".claude", "projects"))
+		}
 	}
 
 	// Credentials file: existence-gate all tiers in priority order.
@@ -131,4 +169,12 @@ func xdgCacheHome(home string) string {
 		return v
 	}
 	return filepath.Join(home, ".cache")
+}
+
+// xdgDataHome returns $XDG_DATA_HOME when set, otherwise $HOME/.local/share.
+func xdgDataHome(home string) string {
+	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
+		return v
+	}
+	return filepath.Join(home, ".local", "share")
 }

@@ -1,0 +1,1 @@
+{"sessionId":"sess_unk_1","type":"assistant","timestamp":"2026-07-07T10:00:00.000Z","isSidechain":false,"message":{"id":"msg_unk_001","type":"assistant","model":"claude-unknown-99","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}

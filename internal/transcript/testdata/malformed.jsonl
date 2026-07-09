@@ -1,0 +1,3 @@
+{"sessionId":"sess_mal_1","type":"assistant","timestamp":"2026-07-07T10:00:00.000Z","isSidechain":false,"message":{"id":"msg_mal_001","type":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"assistant","message":{"id":"msg_mal_bad","usage":CORRUPTED_JSON_NOT_VALID_AT_ALL
+{"sessionId":"sess_mal_1","type":"assistant","timestamp":"2026-07-07T11:00:00.000Z","isSidechain":false,"message":{"id":"msg_mal_002","type":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":200,"output_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
