@@ -52,15 +52,16 @@ func TestDefault_IconGlyph(t *testing.T) {
 }
 
 // TestCrossConsistency_ThemeMatchesInstallCSS verifies that theme.Default()'s
-// hex colors are byte-identical to the ones used in install's icon color map.
+// hex colors are byte-identical to the ones used in install's CSS color: overrides.
 // The cross-package import is test-only; it prevents the two sources of truth
 // from drifting silently (ADR-7).
 //
-// Note: with the SVG icon approach the hex colors are no longer written as CSS
-// `color:` properties — instead they are used to recolor the SVG fill. The CSS
-// block contains background-image paths. The cross-consistency check is now
-// done against install.IconSeverityColors() which is the single source of truth
-// for per-severity hex values within the install package.
+// Change 17 — theme-adaptive symbolic icon: the CSS block now uses
+// -gtk-recolor(url("claude-symbolic.svg")) so the icon inherits the theme
+// foreground for the low/calm state. Severity states (mid/high/critical) override
+// `color:` with the Catppuccin Mocha hex values — the same values used by the
+// dashboard severity bars. install.IconSeverityColors() is the single source of
+// truth for these three hex values within the install package.
 func TestCrossConsistency_ThemeMatchesInstallCSS(t *testing.T) {
 	p := theme.Default()
 	iconColors := install.IconSeverityColors()
@@ -70,10 +71,9 @@ func TestCrossConsistency_ThemeMatchesInstallCSS(t *testing.T) {
 		name string
 		want string
 	}{
-		// Low: icon keeps the brand color; the theme palette uses green for "calm".
-		// These intentionally differ — the icon uses the Claude brand orange for calm,
-		// the dashboard bars use the theme green. Cross-consistency only applies to
-		// mid/high/critical where both the theme and icons must use the same hex.
+		// Low: inherits theme foreground via -gtk-recolor (no color: override).
+		// Cross-consistency only applies to mid/high/critical where both the theme
+		// severity bars and the CSS color: override must use the same hex.
 		{severity.Mid, "mid", "#f9e2af"},
 		{severity.High, "high", "#fab387"},
 		{severity.Critical, "critical", "#f38ba8"},
@@ -96,12 +96,18 @@ func TestCrossConsistency_ThemeMatchesInstallCSS(t *testing.T) {
 }
 
 // TestCrossConsistency_IconSeverityColors_HasAllSeverities verifies that
-// install.IconSeverityColors() has entries for all four severity levels.
+// install.IconSeverityColors() has entries for the three non-low severity levels.
+// Change 17: "low" is intentionally absent — with -gtk-recolor the low/calm state
+// inherits the theme foreground automatically, so no CSS color: override is needed.
 func TestCrossConsistency_IconSeverityColors_HasAllSeverities(t *testing.T) {
 	colors := install.IconSeverityColors()
-	for _, key := range []string{"low", "mid", "high", "critical"} {
+	for _, key := range []string{"mid", "high", "critical"} {
 		if v, ok := colors[key]; !ok || v == "" {
 			t.Errorf("install.IconSeverityColors() missing or empty key %q", key)
 		}
+	}
+	// "low" must NOT be present.
+	if v, ok := colors["low"]; ok {
+		t.Errorf("install.IconSeverityColors() must not contain 'low' key (got %q); low inherits theme foreground", v)
 	}
 }

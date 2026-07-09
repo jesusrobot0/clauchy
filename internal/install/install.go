@@ -91,25 +91,25 @@ const panelClass = "clauchy.panel"
 // Exported for cross-package tests and verification.
 func PanelClass() string { return panelClass }
 
-// iconColors holds the fill hex for each severity variant.
-// Low uses white (#ffffff) to match the other white bar icons — the calm state
-// is now white, consistent with bar icon conventions. Brand orange is no longer
-// used for low severity.
-// Mid / High / Critical use the theme palette hex values for severity coloring.
+// severityColors holds the CSS color: override hex for each non-low severity.
+// With GTK symbolic recoloring (-gtk-recolor), the low/calm state has NO color
+// override — the widget inherits the theme foreground automatically, adapting to
+// any Omarchy theme swap. Mid/high/critical use explicit Catppuccin Mocha hexes.
 // This is the single source of truth within the install package;
 // ui/theme's cross-consistency test imports this map to check alignment.
-var iconColors = map[string]string{
-	"low":      "#ffffff", // white — matches other white bar icons in the calm state
+var severityColors = map[string]string{
 	"mid":      "#f9e2af", // Catppuccin Mocha Yellow
 	"high":     "#fab387", // Catppuccin Mocha Peach
 	"critical": "#f38ba8", // Catppuccin Mocha Red
 }
 
-// IconSeverityColors returns the icon fill hex values by severity key.
+// IconSeverityColors returns the CSS color: hex values by severity key.
+// Only mid, high, and critical are returned — low has no color override because
+// the -gtk-recolor approach lets it inherit the theme foreground.
 // Exported for cross-package tests (ui/theme cross-consistency).
 func IconSeverityColors() map[string]string {
-	out := make(map[string]string, len(iconColors))
-	for k, v := range iconColors {
+	out := make(map[string]string, len(severityColors))
+	for k, v := range severityColors {
 		out[k] = v
 	}
 	return out
@@ -125,37 +125,29 @@ const (
 )
 
 // buildCSSBlock returns the Waybar CSS block that clauchy install generates.
-// It embeds absolute paths to the icon SVG files so Waybar can load them as
-// background images. The icon glyph is replaced by CSS background-image so
-// the module box can be any size; Output.Text emits a single space " " to
-// make the box exist without drawing a glyph.
 //
-// Each severity class gets a background-image override pointing at its icon
-// file. The base #custom-clauchy selector sets background-size/repeat/position
-// and a min-width so the box is always wide enough to show the image.
+// Change 17 — Theme-adaptive symbolic icon:
+// The base selector uses -gtk-recolor(url("<abs>/claude-symbolic.svg")) so the
+// icon inherits the widget's CSS `color` property. In the low/calm state no color
+// override is present, so the icon adopts the current theme foreground automatically
+// (adapts to any Omarchy theme). Severity states (mid/high/critical) set `color:`
+// to Catppuccin Mocha hex values — the same palette used by the dashboard bars.
+//
+// Sizing: 12.5px × 12.5px (~10% smaller than the previous 14px), min-width 16px.
 func buildCSSBlock(iconDir string) string {
-	lowPath := filepath.Join(iconDir, "icon-low.svg")
-	midPath := filepath.Join(iconDir, "icon-mid.svg")
-	highPath := filepath.Join(iconDir, "icon-high.svg")
-	critPath := filepath.Join(iconDir, "icon-critical.svg")
+	symbolicPath := filepath.Join(iconDir, "claude-symbolic.svg")
 
 	return `/* clauchy start */
 #custom-clauchy {
-    background-image: url("` + lowPath + `");
-    background-size: 14px 14px;
+    background-image: -gtk-recolor(url("` + symbolicPath + `"));
+    background-size: 12.5px 12.5px;
     background-repeat: no-repeat;
     background-position: center;
-    min-width: 18px;
+    min-width: 16px;
 }
-#custom-clauchy.mid {
-    background-image: url("` + midPath + `");
-}
-#custom-clauchy.high {
-    background-image: url("` + highPath + `");
-}
-#custom-clauchy.critical {
-    background-image: url("` + critPath + `");
-}
+#custom-clauchy.mid      { color: #f9e2af; }
+#custom-clauchy.high     { color: #fab387; }
+#custom-clauchy.critical { color: #f38ba8; }
 /* clauchy end */
 `
 }
@@ -744,28 +736,34 @@ func arrayAppendEdit(src []byte, arrayClosePos int) edit {
 
 // ─── Icon helpers ─────────────────────────────────────────────────────────────
 
-// writeIcons writes four severity-colored SVG icon variants to iconDir.
-// It uses string replacement on the embedded SVG template, replacing the brand
-// fill hex with the per-severity hex. icon-low.svg keeps the brand color
-// (#D97757) unchanged. Existing files are overwritten (overwrite-safe).
+// writeIcons writes a single claude-symbolic.svg to iconDir using the GTK
+// symbolic-icon convention base color (#bebebe fill). The -gtk-recolor CSS
+// function then recolors it at runtime according to the widget's `color` CSS
+// property, making the icon theme-adaptive.
+//
+// On every run the function also best-effort removes the four old severity-colored
+// variant files (icon-{low,mid,high,critical}.svg) that were written by previous
+// clauchy versions. Removal errors are silently ignored — the cleanup is
+// opportunistic and must not abort the install.
 func writeIcons(iconDir string) error {
 	if err := os.MkdirAll(iconDir, 0o755); err != nil {
 		return fmt.Errorf("icon dir: %w", err)
 	}
 
+	// Write the single symbolic icon with the GTK symbolic base color.
 	const brandHex = "#D97757"
-	for severity, hex := range iconColors {
-		var content []byte
-		if hex == brandHex {
-			content = claudeSVG
-		} else {
-			content = bytes.ReplaceAll(claudeSVG, []byte(brandHex), []byte(hex))
-		}
-		p := filepath.Join(iconDir, "icon-"+severity+".svg")
-		if err := os.WriteFile(p, content, 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", p, err)
-		}
+	const symbolicHex = "#bebebe"
+	content := bytes.ReplaceAll(claudeSVG, []byte(brandHex), []byte(symbolicHex))
+	symbolicPath := filepath.Join(iconDir, "claude-symbolic.svg")
+	if err := os.WriteFile(symbolicPath, content, 0o644); err != nil {
+		return fmt.Errorf("write claude-symbolic.svg: %w", err)
 	}
+
+	// Best-effort cleanup of old severity-colored variant files from previous installs.
+	for _, name := range []string{"icon-low.svg", "icon-mid.svg", "icon-high.svg", "icon-critical.svg"} {
+		_ = os.Remove(filepath.Join(iconDir, name)) // ignore errors — opportunistic
+	}
+
 	return nil
 }
 

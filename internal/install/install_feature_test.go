@@ -49,8 +49,8 @@ func makeRunConfig(t *testing.T, cfgName, cssName string) (install.RunConfig, st
 
 // ─── A: SVG icon variants ─────────────────────────────────────────────────────
 
-// TestRun_IconsWritten_OnFreshInstall verifies that four icon variant SVG files
-// are written to DataHome/clauchy/ on a fresh install.
+// TestRun_IconsWritten_OnFreshInstall verifies that the single claude-symbolic.svg
+// file is written to DataHome/clauchy/ on a fresh install (Change 17 — symbolic icon).
 func TestRun_IconsWritten_OnFreshInstall(t *testing.T) {
 	cfg, _ := makeRunConfig(t, "config_fresh.jsonc", "style_fresh.css")
 
@@ -59,80 +59,56 @@ func TestRun_IconsWritten_OnFreshInstall(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if !res.IconsWritten {
-		t.Error("IconsWritten should be true after fresh install")
+		t.Error("IconsWritten should be true after writing claude-symbolic.svg")
 	}
 
 	iconDir := filepath.Join(cfg.DataHome, "clauchy")
-	for _, name := range []string{"icon-low.svg", "icon-mid.svg", "icon-high.svg", "icon-critical.svg"} {
-		p := filepath.Join(iconDir, name)
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("icon file missing: %s", p)
+	symbolicPath := filepath.Join(iconDir, "claude-symbolic.svg")
+	if _, err := os.Stat(symbolicPath); err != nil {
+		t.Errorf("claude-symbolic.svg missing: %v", err)
+	}
+}
+
+// TestRun_SymbolicIcon_BaseFill verifies claude-symbolic.svg uses the GTK symbolic
+// base color (#bebebe) so -gtk-recolor can recolor it at runtime.
+func TestRun_SymbolicIcon_BaseFill(t *testing.T) {
+	cfg, _ := makeRunConfig(t, "config_fresh.jsonc", "style_fresh.css")
+	if _, err := install.Run(cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cfg.DataHome, "clauchy", "claude-symbolic.svg"))
+	if err != nil {
+		t.Fatalf("read claude-symbolic.svg: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`fill="#bebebe"`)) {
+		t.Errorf("claude-symbolic.svg must have GTK symbolic base color #bebebe, got:\n%s", data)
+	}
+}
+
+// TestRun_CSS_SeverityColorOverrides verifies that severity states override color:
+// using the Catppuccin Mocha hex values — now via CSS color: (not background-image:).
+func TestRun_CSS_SeverityColorOverrides(t *testing.T) {
+	cfg, _ := makeRunConfig(t, "config_fresh.jsonc", "style_fresh.css")
+	if _, err := install.Run(cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	cssData, err := os.ReadFile(cfg.StylePath)
+	if err != nil {
+		t.Fatalf("read css: %v", err)
+	}
+	s := string(cssData)
+
+	cases := []struct{ class, hex string }{
+		{".mid", "#f9e2af"},
+		{".high", "#fab387"},
+		{".critical", "#f38ba8"},
+	}
+	for _, c := range cases {
+		if !strings.Contains(s, "color: "+c.hex) {
+			t.Errorf("CSS must contain color: %s for %s override", c.hex, c.class)
 		}
-	}
-}
-
-// TestRun_IconLow_WhiteColor verifies icon-low.svg uses white (#ffffff) to match
-// the other white bar icons in the calm/low state.
-func TestRun_IconLow_WhiteColor(t *testing.T) {
-	cfg, _ := makeRunConfig(t, "config_fresh.jsonc", "style_fresh.css")
-	if _, err := install.Run(cfg); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(cfg.DataHome, "clauchy", "icon-low.svg"))
-	if err != nil {
-		t.Fatalf("read icon-low.svg: %v", err)
-	}
-	if !bytes.Contains(data, []byte(`fill="#ffffff"`)) {
-		t.Errorf("icon-low.svg should use white #ffffff, got:\n%s", data)
-	}
-}
-
-// TestRun_IconMid_MidColor verifies icon-mid.svg has the mid severity hex (#f9e2af).
-func TestRun_IconMid_MidColor(t *testing.T) {
-	cfg, _ := makeRunConfig(t, "config_fresh.jsonc", "style_fresh.css")
-	if _, err := install.Run(cfg); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(cfg.DataHome, "clauchy", "icon-mid.svg"))
-	if err != nil {
-		t.Fatalf("read icon-mid.svg: %v", err)
-	}
-	if !bytes.Contains(data, []byte(`fill="#f9e2af"`)) {
-		t.Errorf("icon-mid.svg should have mid color #f9e2af, got:\n%s", data)
-	}
-}
-
-// TestRun_IconHigh_HighColor verifies icon-high.svg has the high severity hex (#fab387).
-func TestRun_IconHigh_HighColor(t *testing.T) {
-	cfg, _ := makeRunConfig(t, "config_fresh.jsonc", "style_fresh.css")
-	if _, err := install.Run(cfg); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(cfg.DataHome, "clauchy", "icon-high.svg"))
-	if err != nil {
-		t.Fatalf("read icon-high.svg: %v", err)
-	}
-	if !bytes.Contains(data, []byte(`fill="#fab387"`)) {
-		t.Errorf("icon-high.svg should have high color #fab387, got:\n%s", data)
-	}
-}
-
-// TestRun_IconCritical_CriticalColor verifies icon-critical.svg has the critical hex (#f38ba8).
-func TestRun_IconCritical_CriticalColor(t *testing.T) {
-	cfg, _ := makeRunConfig(t, "config_fresh.jsonc", "style_fresh.css")
-	if _, err := install.Run(cfg); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(cfg.DataHome, "clauchy", "icon-critical.svg"))
-	if err != nil {
-		t.Fatalf("read icon-critical.svg: %v", err)
-	}
-	if !bytes.Contains(data, []byte(`fill="#f38ba8"`)) {
-		t.Errorf("icon-critical.svg should have critical color #f38ba8, got:\n%s", data)
 	}
 }
 
@@ -165,7 +141,7 @@ func TestRun_Icons_Idempotent(t *testing.T) {
 	}
 }
 
-// TestRun_Icons_ContainSVGStructure verifies each icon is a valid SVG (has <svg and </svg>).
+// TestRun_Icons_ContainSVGStructure verifies claude-symbolic.svg is a valid SVG.
 func TestRun_Icons_ContainSVGStructure(t *testing.T) {
 	cfg, _ := makeRunConfig(t, "config_fresh.jsonc", "style_fresh.css")
 	if _, err := install.Run(cfg); err != nil {
@@ -173,24 +149,22 @@ func TestRun_Icons_ContainSVGStructure(t *testing.T) {
 	}
 
 	iconDir := filepath.Join(cfg.DataHome, "clauchy")
-	for _, name := range []string{"icon-low.svg", "icon-mid.svg", "icon-high.svg", "icon-critical.svg"} {
-		data, err := os.ReadFile(filepath.Join(iconDir, name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		if !bytes.Contains(data, []byte(`<svg`)) {
-			t.Errorf("%s: missing <svg element", name)
-		}
-		if !bytes.Contains(data, []byte(`</svg>`)) {
-			t.Errorf("%s: missing </svg> closing tag", name)
-		}
+	data, err := os.ReadFile(filepath.Join(iconDir, "claude-symbolic.svg"))
+	if err != nil {
+		t.Fatalf("read claude-symbolic.svg: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`<svg`)) {
+		t.Error("claude-symbolic.svg: missing <svg element")
+	}
+	if !bytes.Contains(data, []byte(`</svg>`)) {
+		t.Error("claude-symbolic.svg: missing </svg> closing tag")
 	}
 }
 
 // ─── A: CSS background-image rules ───────────────────────────────────────────
 
-// TestRun_CSS_HasBackgroundImage verifies the generated CSS block includes
-// background-image rules referencing absolute icon paths.
+// TestRun_CSS_HasBackgroundImage verifies the generated CSS block includes a
+// -gtk-recolor background-image rule referencing the symbolic icon (Change 17).
 func TestRun_CSS_HasBackgroundImage(t *testing.T) {
 	cfg, _ := makeRunConfig(t, "config_fresh.jsonc", "style_fresh.css")
 	if _, err := install.Run(cfg); err != nil {
@@ -202,17 +176,20 @@ func TestRun_CSS_HasBackgroundImage(t *testing.T) {
 		t.Fatalf("read css: %v", err)
 	}
 
-	// Must reference icon-low.svg in the base selector
+	// Must use -gtk-recolor wrapping the symbolic icon path.
 	if !bytes.Contains(cssData, []byte("background-image")) {
 		t.Error("CSS block must contain background-image property")
 	}
-	if !bytes.Contains(cssData, []byte("icon-low.svg")) {
-		t.Error("CSS base selector must reference icon-low.svg")
+	if !bytes.Contains(cssData, []byte("claude-symbolic.svg")) {
+		t.Error("CSS base selector must reference claude-symbolic.svg")
+	}
+	if !bytes.Contains(cssData, []byte("-gtk-recolor")) {
+		t.Error("CSS base selector must use -gtk-recolor for theme-adaptive coloring")
 	}
 }
 
 // TestRun_CSS_BaseSelector_MinWidth verifies the base #custom-clauchy selector
-// has min-width: 22px and background-size/repeat/position.
+// uses the Change 17 sizing: 12.5px × 12.5px (~10% smaller) and min-width: 16px.
 func TestRun_CSS_BaseSelector_MinWidth(t *testing.T) {
 	cfg, _ := makeRunConfig(t, "config_fresh.jsonc", "style_fresh.css")
 	if _, err := install.Run(cfg); err != nil {
@@ -225,11 +202,11 @@ func TestRun_CSS_BaseSelector_MinWidth(t *testing.T) {
 	}
 	s := string(cssData)
 
-	if !strings.Contains(s, "min-width: 18px") {
-		t.Error("CSS must contain min-width: 18px in #custom-clauchy base selector")
+	if !strings.Contains(s, "min-width: 16px") {
+		t.Error("CSS must contain min-width: 16px in #custom-clauchy base selector")
 	}
-	if !strings.Contains(s, "background-size: 14px 14px") {
-		t.Error("CSS must contain background-size: 14px 14px")
+	if !strings.Contains(s, "background-size: 12.5px 12.5px") {
+		t.Error("CSS must contain background-size: 12.5px 12.5px")
 	}
 	if !strings.Contains(s, "background-repeat: no-repeat") {
 		t.Error("CSS must contain background-repeat: no-repeat")
@@ -239,8 +216,9 @@ func TestRun_CSS_BaseSelector_MinWidth(t *testing.T) {
 	}
 }
 
-// TestRun_CSS_PerClassOverrides verifies .mid/.high/.critical classes reference
-// their respective icon files.
+// TestRun_CSS_PerClassOverrides verifies .mid/.high/.critical classes set the
+// color: property to the Catppuccin Mocha severity hexes (Change 17 — color: via
+// -gtk-recolor instead of per-class background-image:).
 func TestRun_CSS_PerClassOverrides(t *testing.T) {
 	cfg, _ := makeRunConfig(t, "config_fresh.jsonc", "style_fresh.css")
 	if _, err := install.Run(cfg); err != nil {
@@ -253,9 +231,17 @@ func TestRun_CSS_PerClassOverrides(t *testing.T) {
 	}
 	s := string(cssData)
 
-	for _, icon := range []string{"icon-mid.svg", "icon-high.svg", "icon-critical.svg"} {
-		if !strings.Contains(s, icon) {
-			t.Errorf("CSS must reference %s in per-class override", icon)
+	cases := []struct{ class, hex string }{
+		{".mid", "#f9e2af"},
+		{".high", "#fab387"},
+		{".critical", "#f38ba8"},
+	}
+	for _, c := range cases {
+		if !strings.Contains(s, "#custom-clauchy"+c.class) {
+			t.Errorf("CSS must contain #custom-clauchy%s selector", c.class)
+		}
+		if !strings.Contains(s, "color: "+c.hex) {
+			t.Errorf("CSS must set color: %s for %s override", c.hex, c.class)
 		}
 	}
 }
@@ -279,28 +265,29 @@ func TestRun_CSS_AbsolutePaths(t *testing.T) {
 	}
 }
 
-// TestCrossConsistency_IconColors verifies that the hex colors used for icons
-// (within the install package) match the theme palette hex values.
+// TestCrossConsistency_IconColors verifies that the CSS color: hex values exposed
+// by install.IconSeverityColors() match the Catppuccin Mocha severity palette.
+// Change 17: "low" is no longer in the map — low inherits the theme foreground
+// via -gtk-recolor (no CSS color: override). Only mid/high/critical have explicit
+// hex overrides.
 func TestCrossConsistency_IconColors(t *testing.T) {
-	// The install package must expose the icon color constants so tests can
-	// verify they match theme.Default().
 	colors := install.IconSeverityColors()
 
 	// mid = #f9e2af (Catppuccin Mocha Yellow)
 	if colors["mid"] != "#f9e2af" {
-		t.Errorf("mid icon color = %q, want #f9e2af", colors["mid"])
+		t.Errorf("mid color = %q, want #f9e2af", colors["mid"])
 	}
 	// high = #fab387 (Catppuccin Mocha Peach)
 	if colors["high"] != "#fab387" {
-		t.Errorf("high icon color = %q, want #fab387", colors["high"])
+		t.Errorf("high color = %q, want #fab387", colors["high"])
 	}
 	// critical = #f38ba8 (Catppuccin Mocha Red)
 	if colors["critical"] != "#f38ba8" {
-		t.Errorf("critical icon color = %q, want #f38ba8", colors["critical"])
+		t.Errorf("critical color = %q, want #f38ba8", colors["critical"])
 	}
-	// low: white (#ffffff) — matches the other white bar icons; calm state is now white
-	if colors["low"] != "#ffffff" {
-		t.Errorf("low icon color = %q, want #ffffff (white, matching other bar icons)", colors["low"])
+	// "low" must NOT be present (inherits theme foreground via -gtk-recolor).
+	if v, ok := colors["low"]; ok {
+		t.Errorf("IconSeverityColors() must not contain 'low' key (got %q); low inherits theme foreground", v)
 	}
 }
 

@@ -20,19 +20,13 @@ window#waybar {
 
 /* clauchy start */
 #custom-clauchy {
-    background-image: url("icon-low.svg");
-    background-size: 14px 14px;
+    background-image: -gtk-recolor(url("claude-symbolic.svg"));
+    background-size: 12.5px 12.5px;
     background-repeat: no-repeat;
     background-position: center;
-    min-width: 18px;
+    min-width: 16px;
 }
-#custom-clauchy.mid {
-    background-image: url("icon-mid.svg");
-}
-#custom-clauchy.high {
-    background-image: url("icon-high.svg");
-}
-#custom-clauchy.critical {
-    background-image: url("icon-critical.svg");
-}
+#custom-clauchy.mid      { color: #f9e2af; }
+#custom-clauchy.high     { color: #fab387; }
+#custom-clauchy.critical { color: #f38ba8; }
 /* clauchy end */
