@@ -72,9 +72,10 @@ type TickMsg time.Time
 // Exported so tests can send it directly to Model.Update.
 type AnimTickMsg struct{}
 
-// SyncPulseMinFrames is the minimum number of animation frames the header
-// animation stays alive after a sync starts (13 frames x 150ms ≈ 2s), so
-// even an instant cache-hit sync reads as a deliberate gesture, not a flicker.
+// SyncPulseMinFrames is the number of animation frames the header wave plays
+// when the pulse is triggered (13 frames × 150 ms ≈ 2 s). The pulse fires on
+// app open and whenever a fetch lands data with a NEW CachedAt timestamp for
+// limits or status; cache-hit ticks and local stats recomputes do not animate.
 // Exported so tests exhaust the pulse without hardcoding the value.
 const SyncPulseMinFrames = 13
 
@@ -95,13 +96,24 @@ type Model struct {
 	width, height int
 	frame         int // animation frame counter, incremented by each AnimTickMsg
 
-	// syncPulseFrames is a countdown that keeps the header animation alive for
-	// at least ~2s (SyncPulseMinFrames × 150ms) after a sync starts. Set to SyncPulseMinFrames
-	// whenever a fetch is issued; decremented on each AnimTickMsg; animation
-	// is active while loadingLimits || loadingStats || syncPulseFrames > 0.
-	// This prevents an ugly single-frame flicker when a cache hit resolves
-	// before the first AnimTickMsg arrives.
+	// syncPulseFrames is a countdown that drives the header animation.
+	// The animation plays only while syncPulseFrames > 0 (pulse-only gate —
+	// loading flags no longer gate the animation, they guard the in-flight fetch).
+	// Set to SyncPulseMinFrames on construction and whenever fresh API data lands:
+	//   - LimitsMsg with Err==nil and a new (non-zero, changed) CachedAt
+	//   - StatusMsg with Err==nil and a new (non-zero, changed) CachedAt
+	// TickMsg and StatsMsg do NOT trigger the pulse.
+	// Decremented by 1 on each AnimTickMsg; zero = header renders static bold.
 	syncPulseFrames int
+
+	// prevLimitsCachedAt is the CachedAt from the most recent LimitsMsg that
+	// triggered a pulse. Used to detect whether a new LimitsMsg carries fresh
+	// API data (changed CachedAt) vs. a cache-hit (same CachedAt).
+	prevLimitsCachedAt time.Time
+
+	// prevStatusCachedAt is the CachedAt from the most recent StatusMsg that
+	// triggered a pulse. Same fresh-vs-cache-hit detection as limits.
+	prevStatusCachedAt time.Time
 
 	loadingLimits bool
 	loadingStats  bool
@@ -195,6 +207,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.limitsErr = msg.Err
 		m.hasLimits = msg.Err == nil && !msg.Usage.CachedAt.IsZero()
 		m.lastUpdated = m.now()
+		// Fresh API data: non-zero CachedAt that differs from the previous value
+		// means the TTL expired and the API returned a new response. Trigger the
+		// header wave so the user sees a sync gesture. Cache-hit ticks (same
+		// CachedAt) do not re-trigger.
+		if msg.Err == nil && !msg.Usage.CachedAt.IsZero() && !msg.Usage.CachedAt.Equal(m.prevLimitsCachedAt) {
+			m.syncPulseFrames = SyncPulseMinFrames
+			m.prevLimitsCachedAt = msg.Usage.CachedAt
+		}
 		return m, nil
 
 	case StatsMsg:
@@ -210,34 +230,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusData = msg.Status
 		m.statusErr = msg.Err
 		m.hasStatus = msg.Err == nil
+		// Fresh API data: same fresh-CachedAt rule as LimitsMsg.
+		if msg.Err == nil && !msg.Status.CachedAt.IsZero() && !msg.Status.CachedAt.Equal(m.prevStatusCachedAt) {
+			m.syncPulseFrames = SyncPulseMinFrames
+			m.prevStatusCachedAt = msg.Status.CachedAt
+		}
 		return m, nil
 
 	case TickMsg:
 		var cmds []tea.Cmd
 		// In-flight guard: only re-issue a fetch when its loading flag is clear.
-		var issuedFetch bool
+		// Note: the loading flags guard fetches only; they no longer drive the
+		// header animation (pulse-only gate since Change 20).
 		if !m.loadingLimits {
 			m.loadingLimits = true
-			issuedFetch = true
 			cmds = append(cmds, fetchLimitsCmd(m.deps))
 		}
 		if !m.loadingStats {
 			m.loadingStats = true
-			issuedFetch = true
 			cmds = append(cmds, fetchStatsCmd(m.deps))
 		}
 		// The status branch also requires a wired FetchStatus dep: with a nil
-		// dep there is no fetch to issue, so neither the loading flag nor the
-		// sync pulse may be touched for it.
+		// dep there is no fetch to issue, so the loading flag must not be touched.
 		if !m.loadingStatus && m.deps.FetchStatus != nil {
 			m.loadingStatus = true
-			issuedFetch = true
 			cmds = append(cmds, fetchStatusCmd(m.deps))
 		}
-		// Reset the minimum-pulse countdown whenever a new sync starts.
-		if issuedFetch {
-			m.syncPulseFrames = SyncPulseMinFrames
-		}
+		// The sync pulse is NOT reset on tick. It fires only when fresh API data
+		// lands (LimitsMsg or StatusMsg with a new CachedAt).
 		cmds = append(cmds, tickCmd())
 		return m, tea.Batch(cmds...)
 
@@ -316,9 +336,9 @@ type Scheme struct {
 // MonochromeScheme returns the default scheme: white/gray tones, no Sky hue,
 // matching the user's original black-and-white reference design.
 // Errors keep red because they SHOULD alarm regardless of color mode.
-// The header "clauchy" animation is sync-gated: active only while data is
-// loading (loadingLimits || loadingStats || loadingStatus || syncPulseFrames > 0);
-// when idle the title renders as plain bold terminal-default (Change 19).
+// The header "clauchy" animation is pulse-gated: active only while
+// syncPulseFrames > 0 (fires on app open and fresh API data; cache-hit ticks
+// do not re-trigger — Change 20). When idle it renders as plain bold terminal-default.
 func MonochromeScheme() Scheme {
 	return Scheme{
 		SectionTitle:  "",        // terminal default bold-white
@@ -445,16 +465,18 @@ func (m Model) View() string {
 	return strings.Join(lines, "\n")
 }
 
-// viewHeader renders the "clauchy" brand title (Change 19).
-// While syncing (loadingLimits || loadingStats || loadingStatus || syncPulseFrames > 0)
-// the title is animated via RainbowText (colorful scheme) or GrayscaleText (mono scheme).
-// When idle it renders static BOLD terminal-default (no per-letter color codes).
+// viewHeader renders the "clauchy" brand title (Change 20).
+// The animation gate is pulse-only: the wave plays while syncPulseFrames > 0.
+// Loading flags (loadingLimits/loadingStats/loadingStatus) no longer gate the
+// animation — they only guard the in-flight fetch deduplication in TickMsg.
+// The pulse fires on app open and when fresh API data lands (LimitsMsg or
+// StatusMsg with a new CachedAt); cache-hit ticks do not re-trigger.
+// When idle (syncPulseFrames == 0) the title renders static BOLD terminal-default.
 // When a plan label (e.g. "Max 20x") is set it is shown right-aligned on
-// the same row in the scheme's Subtle color. The two sides are separated by
-// enough spaces to fill contentWidth exactly.
+// the same row in the scheme's Subtle color.
 func (m Model) viewHeader(contentWidth int) string {
 	const brand = "clauchy"
-	syncing := m.loadingLimits || m.loadingStats || m.loadingStatus || m.syncPulseFrames > 0
+	syncing := m.syncPulseFrames > 0
 
 	var title string
 	if syncing {

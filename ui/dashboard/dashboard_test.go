@@ -1157,6 +1157,217 @@ func TestHeaderAnimation_MinimumPulse(t *testing.T) {
 	}
 }
 
+// ─── Change 20: sync pulse semantics ─────────────────────────────────────────
+//
+// The header animation is driven ONLY by syncPulseFrames > 0 (not by the loading
+// flags). The pulse is set to SyncPulseMinFrames on:
+//   - construction (existing)
+//   - LimitsMsg arriving with fresh CachedAt (different from previous)
+//   - StatusMsg arriving with fresh CachedAt (different from previous)
+// StatsMsg and TickMsg do NOT trigger the pulse.
+
+// exhaustPulse sends SyncPulseMinFrames AnimTickMsgs to the model, fully
+// draining the minimum-pulse countdown. Returns the final model state.
+func exhaustPulse(m dashboard.Model) dashboard.Model {
+	var cur tea.Model = m
+	for i := 0; i < dashboard.SyncPulseMinFrames; i++ {
+		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
+	}
+	return cur.(dashboard.Model)
+}
+
+// idleModel builds a model, delivers nil-data messages to clear all loading
+// flags WITHOUT triggering a pulse reset, and exhausts the initial pulse so
+// the header is guaranteed static. Used by pulse-semantics tests.
+//
+// Note: to avoid triggering the fresh-CachedAt pulse rule, LimitsMsg is
+// delivered with zero CachedAt (already present in the initial model state) and
+// StatsMsg is delivered (doesn't trigger pulse). Status is kept at zero value.
+func idleBaseModel(t *testing.T) dashboard.Model {
+	t.Helper()
+	deps := dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) { return limits.Usage{}, nil },
+		FetchStats:  func() (transcript.Stats, error) { return transcript.Stats{}, nil },
+		FetchStatus: func() (status.Status, error) { return status.Status{}, nil },
+	}
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	// LimitsMsg with zero CachedAt — same as initial zero state, no pulse reset.
+	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: limits.Usage{}, Err: nil})
+	// StatsMsg — per spec, never triggers pulse.
+	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: transcript.Stats{}, Err: nil})
+	// StatusMsg with zero CachedAt — same as initial zero state, no pulse reset.
+	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: nil})
+	return exhaustPulse(m5.(dashboard.Model))
+}
+
+// TestSyncPulse_FreshLimitsMsg_TriggersPulse verifies that after the initial
+// pulse is exhausted, a LimitsMsg with a NEW (non-zero) CachedAt that differs
+// from the previous CachedAt resets syncPulseFrames to SyncPulseMinFrames and
+// the header becomes animated again (Change 20).
+func TestSyncPulse_FreshLimitsMsg_TriggersPulse(t *testing.T) {
+	idle := idleBaseModel(t)
+
+	// Verify it starts static.
+	headerLine := strings.Split(idle.View(), "\n")[1]
+	if n := countColorCodes(headerLine); n > 0 {
+		t.Fatalf("precondition failed: header is still animated (%d codes) before fresh LimitsMsg", n)
+	}
+
+	// Deliver LimitsMsg with a NEW CachedAt (different from the zero previous value).
+	freshUsage := limits.Usage{
+		CachedAt: fixedNow.Add(-5 * time.Second), // non-zero, different from previous zero
+	}
+	after, _ := idle.Update(dashboard.LimitsMsg{Usage: freshUsage, Err: nil})
+
+	// Pulse must be reset.
+	dm := after.(dashboard.Model)
+	if got := dm.SyncPulseFrames(); got < dashboard.SyncPulseMinFrames {
+		t.Errorf("SyncPulseFrames() = %d after fresh LimitsMsg, want >= %d", got, dashboard.SyncPulseMinFrames)
+	}
+
+	// Header must be animated.
+	m2, _ := dm.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	headerLine2 := strings.Split(m2.(dashboard.Model).View(), "\n")[1]
+	if n := countColorCodes(headerLine2); n < 7 {
+		t.Errorf("header has %d color codes after fresh LimitsMsg, want >=7 (animated)", n)
+	}
+}
+
+// TestSyncPulse_CachedLimitsMsg_NoRetrigger verifies that a LimitsMsg with the
+// SAME CachedAt as the previous one (cache hit — no new API data) does NOT
+// reset the pulse after it has been exhausted (Change 20).
+func TestSyncPulse_CachedLimitsMsg_NoRetrigger(t *testing.T) {
+	// Start with a model that has received one fresh LimitsMsg.
+	deps := dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) { return limits.Usage{}, nil },
+		FetchStats:  func() (transcript.Stats, error) { return transcript.Stats{}, nil },
+		FetchStatus: func() (status.Status, error) { return status.Status{}, nil },
+	}
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+
+	// First LimitsMsg: fresh CachedAt — sets previous CachedAt to ts1.
+	ts1 := fixedNow.Add(-30 * time.Second)
+	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: limits.Usage{CachedAt: ts1}, Err: nil})
+	// StatsMsg and StatusMsg: clear the remaining loading flags so the precondition
+	// (header is static) holds under BOTH the old code (loading-flag gating) and
+	// the new code (pulse-only gating).
+	m3a, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: transcript.Stats{}, Err: nil})
+	m3s, _ := m3a.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: nil})
+	idle1 := exhaustPulse(m3s.(dashboard.Model))
+
+	// Verify idle.
+	headerLine := strings.Split(idle1.View(), "\n")[1]
+	if n := countColorCodes(headerLine); n > 0 {
+		t.Fatalf("precondition failed: header still animated (%d codes) after exhausting pulse from first LimitsMsg", n)
+	}
+
+	// Second LimitsMsg: SAME CachedAt (ts1) — cache hit, no new data.
+	after, _ := idle1.Update(dashboard.LimitsMsg{Usage: limits.Usage{CachedAt: ts1}, Err: nil})
+	dm := after.(dashboard.Model)
+
+	// Pulse must NOT be reset.
+	if got := dm.SyncPulseFrames(); got > 0 {
+		t.Errorf("SyncPulseFrames() = %d after cache-hit LimitsMsg (same CachedAt), want 0 (no re-trigger)", got)
+	}
+
+	// Header must stay static.
+	m4, _ := dm.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	headerLine2 := strings.Split(m4.(dashboard.Model).View(), "\n")[1]
+	if n := countColorCodes(headerLine2); n > 0 {
+		t.Errorf("header has %d color codes after cache-hit LimitsMsg, want 0 (static)", n)
+	}
+}
+
+// TestSyncPulse_TickMsg_NoPulseReset verifies that a TickMsg alone after the
+// pulse is exhausted does NOT reset syncPulseFrames and the header stays static
+// (Change 20 removes the issuedFetch → pulse coupling from TickMsg).
+func TestSyncPulse_TickMsg_NoPulseReset(t *testing.T) {
+	idle := idleBaseModel(t)
+
+	// Verify idle.
+	headerLine := strings.Split(idle.View(), "\n")[1]
+	if n := countColorCodes(headerLine); n > 0 {
+		t.Fatalf("precondition failed: header animated (%d codes) before TickMsg", n)
+	}
+
+	// TickMsg — must not reset pulse.
+	after, _ := idle.Update(dashboard.TickMsg(fixedNow))
+	dm := after.(dashboard.Model)
+
+	if got := dm.SyncPulseFrames(); got > 0 {
+		t.Errorf("SyncPulseFrames() = %d after TickMsg, want 0 (tick must not re-trigger pulse)", got)
+	}
+
+	// Header must stay static.
+	m2, _ := dm.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	headerLine2 := strings.Split(m2.(dashboard.Model).View(), "\n")[1]
+	if n := countColorCodes(headerLine2); n > 0 {
+		t.Errorf("header has %d color codes after TickMsg with exhausted pulse, want 0 (static)", n)
+	}
+}
+
+// TestSyncPulse_FreshStatusMsg_TriggersPulse verifies that a StatusMsg with a
+// NEW CachedAt (different from the previous) resets the pulse and animates the
+// header (Change 20).
+func TestSyncPulse_FreshStatusMsg_TriggersPulse(t *testing.T) {
+	idle := idleBaseModel(t)
+
+	// Verify idle.
+	headerLine := strings.Split(idle.View(), "\n")[1]
+	if n := countColorCodes(headerLine); n > 0 {
+		t.Fatalf("precondition failed: header animated (%d codes) before fresh StatusMsg", n)
+	}
+
+	// Deliver StatusMsg with a NEW CachedAt (different from the previous zero value).
+	freshStatus := status.Status{
+		Indicator:  "none",
+		ClaudeCode: "operational",
+		CachedAt:   fixedNow.Add(-2 * time.Second), // non-zero, different from previous zero
+	}
+	after, _ := idle.Update(dashboard.StatusMsg{Status: freshStatus, Err: nil})
+	dm := after.(dashboard.Model)
+
+	// Pulse must be reset.
+	if got := dm.SyncPulseFrames(); got < dashboard.SyncPulseMinFrames {
+		t.Errorf("SyncPulseFrames() = %d after fresh StatusMsg, want >= %d", got, dashboard.SyncPulseMinFrames)
+	}
+
+	// Header must be animated.
+	m2, _ := dm.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	headerLine2 := strings.Split(m2.(dashboard.Model).View(), "\n")[1]
+	if n := countColorCodes(headerLine2); n < 7 {
+		t.Errorf("header has %d color codes after fresh StatusMsg, want >=7 (animated)", n)
+	}
+}
+
+// TestSyncPulse_StatsMsg_NoPulse verifies that a StatsMsg does NOT reset the
+// pulse (per Change 20 spec: local recompute every 5s is not a "sync" in the
+// user's mental model).
+func TestSyncPulse_StatsMsg_NoPulse(t *testing.T) {
+	idle := idleBaseModel(t)
+
+	// Verify idle.
+	headerLine := strings.Split(idle.View(), "\n")[1]
+	if n := countColorCodes(headerLine); n > 0 {
+		t.Fatalf("precondition failed: header animated (%d codes) before StatsMsg", n)
+	}
+
+	after, _ := idle.Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	dm := after.(dashboard.Model)
+
+	if got := dm.SyncPulseFrames(); got > 0 {
+		t.Errorf("SyncPulseFrames() = %d after StatsMsg, want 0 (stats must not trigger pulse)", got)
+	}
+
+	m2, _ := dm.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	headerLine2 := strings.Split(m2.(dashboard.Model).View(), "\n")[1]
+	if n := countColorCodes(headerLine2); n > 0 {
+		t.Errorf("header has %d color codes after StatsMsg, want 0 (static)", n)
+	}
+}
+
 // ─── Change 19: brand header + Claude status indicator ───────────────────────
 
 // TestViewHeader_BrandIsClauchy verifies the header now shows "clauchy"
