@@ -1094,7 +1094,7 @@ func TestHeaderAnimation_StaticWhenIdle(t *testing.T) {
 	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: nil})
 	// Exhaust the 4-frame minimum pulse countdown.
 	var cur tea.Model = m5
-	for i := 0; i < 4; i++ {
+	for i := 0; i < dashboard.SyncPulseMinFrames; i++ {
 		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
 	}
 	output := cur.(dashboard.Model).View()
@@ -1131,7 +1131,7 @@ func TestHeaderAnimation_MinimumPulse(t *testing.T) {
 	// After 3 AnimTickMsgs (< 4) the pulse countdown is not yet exhausted
 	// → header animation must still be active.
 	var cur tea.Model = m5
-	for i := 0; i < 3; i++ {
+	for i := 0; i < dashboard.SyncPulseMinFrames-1; i++ {
 		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
 	}
 	outputMid := cur.(dashboard.Model).View()
@@ -1207,7 +1207,7 @@ func TestViewHeader_Static_WhenIdle(t *testing.T) {
 	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
 	// Exhaust 4-frame pulse.
 	var cur tea.Model = m4
-	for i := 0; i < 4; i++ {
+	for i := 0; i < dashboard.SyncPulseMinFrames; i++ {
 		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
 	}
 	// Also deliver StatusMsg to clear loadingStatus.
@@ -1256,7 +1256,7 @@ func footerModel(t *testing.T, s transcript.Stats, st status.Status, stErr error
 	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: s, Err: nil})
 	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: st, Err: stErr})
 	var cur tea.Model = m5
-	for i := 0; i < 4; i++ {
+	for i := 0; i < dashboard.SyncPulseMinFrames; i++ {
 		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
 	}
 	return cur.(dashboard.Model)
@@ -1403,7 +1403,7 @@ func TestFooterStatus_FetchError_EmptyLeft(t *testing.T) {
 	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
 	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: fmt.Errorf("transient")})
 	var cur tea.Model = m5
-	for i := 0; i < 4; i++ {
+	for i := 0; i < dashboard.SyncPulseMinFrames; i++ {
 		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
 	}
 	output := stripANSI(cur.(dashboard.Model).View())
@@ -1514,7 +1514,7 @@ func TestNilFetchStatus_IdleAfterData(t *testing.T) {
 	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
 	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
 	var cur tea.Model = m4
-	for i := 0; i < 4; i++ {
+	for i := 0; i < dashboard.SyncPulseMinFrames; i++ {
 		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
 	}
 	headerLine := strings.Split(cur.(dashboard.Model).View(), "\n")[1]
@@ -1535,7 +1535,7 @@ func TestNilFetchStatus_TickDoesNotResetPulse(t *testing.T) {
 	m := dashboard.New(deps, testPalette, fixedNowFn, "")
 	// Exhaust the initial pulse while the limits/stats guards stay ON.
 	var cur tea.Model = m
-	for i := 0; i < 4; i++ {
+	for i := 0; i < dashboard.SyncPulseMinFrames; i++ {
 		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
 	}
 	if got := cur.(dashboard.Model).SyncPulseFrames(); got != 0 {

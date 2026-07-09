@@ -72,6 +72,12 @@ type TickMsg time.Time
 // Exported so tests can send it directly to Model.Update.
 type AnimTickMsg struct{}
 
+// SyncPulseMinFrames is the minimum number of animation frames the header
+// animation stays alive after a sync starts (10 frames x 150ms = 1.5s), so
+// even an instant cache-hit sync reads as a deliberate gesture, not a flicker.
+// Exported so tests exhaust the pulse without hardcoding the value.
+const SyncPulseMinFrames = 10
+
 const tickInterval = 5 * time.Second
 const animTickInterval = 150 * time.Millisecond
 
@@ -90,7 +96,7 @@ type Model struct {
 	frame         int // animation frame counter, incremented by each AnimTickMsg
 
 	// syncPulseFrames is a countdown that keeps the header animation alive for
-	// at least ~600ms (4 anim frames × 150ms) after a sync starts. Set to 4
+	// at least ~1.5s (SyncPulseMinFrames × 150ms) after a sync starts. Set to SyncPulseMinFrames
 	// whenever a fetch is issued; decremented on each AnimTickMsg; animation
 	// is active while loadingLimits || loadingStats || syncPulseFrames > 0.
 	// This prevents an ugly single-frame flicker when a cache hit resolves
@@ -148,7 +154,7 @@ func newWithScheme(d Deps, p theme.Palette, s Scheme, now func() time.Time, plan
 		loadingLimits:   true,
 		loadingStats:    true,
 		loadingStatus:   d.FetchStatus != nil,
-		syncPulseFrames: 4, // guarantee at least 4 anim frames of animation from the initial fetch pair
+		syncPulseFrames: SyncPulseMinFrames, // minimum visible pulse from the initial fetch pair
 	}
 }
 
@@ -230,7 +236,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Reset the minimum-pulse countdown whenever a new sync starts.
 		if issuedFetch {
-			m.syncPulseFrames = 4
+			m.syncPulseFrames = SyncPulseMinFrames
 		}
 		cmds = append(cmds, tickCmd())
 		return m, tea.Batch(cmds...)
