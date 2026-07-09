@@ -9,6 +9,7 @@ import (
 
 	"github.com/jesusrobot0/clauchy/internal/limits"
 	"github.com/jesusrobot0/clauchy/internal/oauth"
+	"github.com/jesusrobot0/clauchy/internal/status"
 	"github.com/jesusrobot0/clauchy/ui/waybar"
 )
 
@@ -52,7 +53,7 @@ func TestOutput_AlwaysThreeKeys(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := waybar.Render(tc.u, tc.err, fixedNow)
+			out := waybar.Render(tc.u, tc.err, fixedNow, status.Status{})
 			b, err := json.Marshal(out)
 			if err != nil {
 				t.Fatalf("json.Marshal: %v", err)
@@ -78,7 +79,7 @@ func TestOutput_AlwaysThreeKeys(t *testing.T) {
 // --- Error states ------------------------------------------------------------
 
 func TestRender_NoCredentials_Critical(t *testing.T) {
-	out := waybar.Render(limits.Usage{}, oauth.ErrNoCredentials, fixedNow)
+	out := waybar.Render(limits.Usage{}, oauth.ErrNoCredentials, fixedNow, status.Status{})
 	if out.Class != "critical" {
 		t.Errorf("class = %q, want %q", out.Class, "critical")
 	}
@@ -91,7 +92,7 @@ func TestRender_NoCredentials_Critical(t *testing.T) {
 }
 
 func TestRender_InvalidCredentials_Critical(t *testing.T) {
-	out := waybar.Render(limits.Usage{}, oauth.ErrInvalidCredentials, fixedNow)
+	out := waybar.Render(limits.Usage{}, oauth.ErrInvalidCredentials, fixedNow, status.Status{})
 	if out.Class != "critical" {
 		t.Errorf("class = %q, want %q", out.Class, "critical")
 	}
@@ -103,7 +104,7 @@ func TestRender_InvalidCredentials_Critical(t *testing.T) {
 // TestRender_RefreshRejected_NoCacheOver7d verifies the persistent-rejection path:
 // >7d stale + ErrRefreshRejected → re-auth guidance, class critical.
 func TestRender_RefreshRejected_NoCacheOver7d(t *testing.T) {
-	out := waybar.Render(limits.Usage{}, oauth.ErrRefreshRejected, fixedNow)
+	out := waybar.Render(limits.Usage{}, oauth.ErrRefreshRejected, fixedNow, status.Status{})
 	if out.Class != "critical" {
 		t.Errorf("class = %q, want %q", out.Class, "critical")
 	}
@@ -115,7 +116,7 @@ func TestRender_RefreshRejected_NoCacheOver7d(t *testing.T) {
 // TestRender_OtherError_Loading verifies that an unexpected error falls back
 // to the Loading… / low state.
 func TestRender_OtherError_Loading(t *testing.T) {
-	out := waybar.Render(limits.Usage{}, errors.New("some unexpected error"), fixedNow)
+	out := waybar.Render(limits.Usage{}, errors.New("some unexpected error"), fixedNow, status.Status{})
 	if out.Class != "low" {
 		t.Errorf("class = %q, want %q", out.Class, "low")
 	}
@@ -127,7 +128,7 @@ func TestRender_OtherError_Loading(t *testing.T) {
 // TestRender_ZeroUsage_NoError_Loading covers the ErrTransient + no-cache path:
 // limits.Cached returns (zero Usage, nil) when there is no stale data.
 func TestRender_ZeroUsage_NoError_Loading(t *testing.T) {
-	out := waybar.Render(limits.Usage{}, nil, fixedNow)
+	out := waybar.Render(limits.Usage{}, nil, fixedNow, status.Status{})
 	if out.Class != "low" {
 		t.Errorf("class = %q, want %q", out.Class, "low")
 	}
@@ -155,7 +156,7 @@ func TestRender_ClassThresholds(t *testing.T) {
 
 	for _, tc := range cases {
 		u := makeUsage(tc.pct, 0)
-		out := waybar.Render(u, nil, fixedNow)
+		out := waybar.Render(u, nil, fixedNow, status.Status{})
 		if out.Class != tc.class {
 			t.Errorf("pct=%.1f → class=%q, want %q", tc.pct, out.Class, tc.class)
 		}
@@ -166,7 +167,7 @@ func TestRender_ClassThresholds(t *testing.T) {
 
 func TestRender_NormalTooltip_TwoLines(t *testing.T) {
 	u := makeUsage(42, 18)
-	out := waybar.Render(u, nil, fixedNow)
+	out := waybar.Render(u, nil, fixedNow, status.Status{})
 
 	// Must contain both required lines
 	if !strings.Contains(out.Tooltip, "<b>Session (5h)</b>") {
@@ -195,7 +196,7 @@ func TestRender_NormalTooltip_TwoLines(t *testing.T) {
 func TestRender_SessionResetFormat_HhMm(t *testing.T) {
 	// 1h 30m from fixedNow
 	u := makeUsage(42, 18)
-	out := waybar.Render(u, nil, fixedNow)
+	out := waybar.Render(u, nil, fixedNow, status.Status{})
 	if !strings.Contains(out.Tooltip, "1h 30m") {
 		t.Errorf("session reset not in Hh Mm format: %q", out.Tooltip)
 	}
@@ -204,7 +205,7 @@ func TestRender_SessionResetFormat_HhMm(t *testing.T) {
 func TestRender_WeeklyResetFormat_DdHh(t *testing.T) {
 	// 3d 4h from fixedNow (76h = 3d 4h)
 	u := makeUsage(42, 18)
-	out := waybar.Render(u, nil, fixedNow)
+	out := waybar.Render(u, nil, fixedNow, status.Status{})
 	if !strings.Contains(out.Tooltip, "3d 4h") {
 		t.Errorf("weekly reset not in Dd Hh format: %q", out.Tooltip)
 	}
@@ -215,7 +216,7 @@ func TestRender_PerModelLines_WhenModelsPresent(t *testing.T) {
 	u.Models = []limits.ModelLimit{
 		{Name: "claude-opus-4-8", Utilization: 30, ResetsAt: fixedNow.Add(76 * time.Hour)},
 	}
-	out := waybar.Render(u, nil, fixedNow)
+	out := waybar.Render(u, nil, fixedNow, status.Status{})
 
 	if !strings.Contains(out.Tooltip, "claude-opus-4-8") {
 		t.Errorf("tooltip missing per-model line: %q", out.Tooltip)
@@ -231,7 +232,7 @@ func TestRender_PerModelLines_WhenModelsPresent(t *testing.T) {
 func TestRender_NoPerModelLines_WhenModelsEmpty(t *testing.T) {
 	u := makeUsage(42, 18)
 	// Models is nil / empty
-	out := waybar.Render(u, nil, fixedNow)
+	out := waybar.Render(u, nil, fixedNow, status.Status{})
 
 	if strings.Contains(out.Tooltip, "(weekly)") && !strings.Contains(out.Tooltip, "Weekly") {
 		// The weekly line itself has no "weekly" in our format, but per-model does
@@ -259,7 +260,7 @@ func TestRender_StaleSuffix(t *testing.T) {
 		CachedAt: staleTime,
 		Stale:    true,
 	}
-	out := waybar.Render(u, nil, fixedNow)
+	out := waybar.Render(u, nil, fixedNow, status.Status{})
 
 	if !strings.Contains(out.Tooltip, "cached 5 min ago") {
 		t.Errorf("stale tooltip missing '(cached 5 min ago)': %q", out.Tooltip)
@@ -278,7 +279,7 @@ func TestRender_StaleValues_NotAnErrorState(t *testing.T) {
 		CachedAt: fixedNow.Add(-3 * time.Minute),
 		Stale:    true,
 	}
-	out := waybar.Render(u, nil, fixedNow)
+	out := waybar.Render(u, nil, fixedNow, status.Status{})
 
 	if out.Class != "high" { // 85% → high
 		t.Errorf("class = %q, want %q", out.Class, "high")
@@ -299,7 +300,7 @@ func TestRender_PangoEscaping(t *testing.T) {
 	u.Models = []limits.ModelLimit{
 		{Name: "A&B <x>", Utilization: 50, ResetsAt: fixedNow.Add(76 * time.Hour)},
 	}
-	out := waybar.Render(u, nil, fixedNow)
+	out := waybar.Render(u, nil, fixedNow, status.Status{})
 
 	// Raw special characters must NOT appear (they would inject Pango markup).
 	if strings.Contains(out.Tooltip, "A&B <x>") {
@@ -327,10 +328,106 @@ func TestRender_Text_SingleSpace(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := waybar.Render(tc.u, tc.err, fixedNow)
+			out := waybar.Render(tc.u, tc.err, fixedNow, status.Status{})
 			if out.Text != " " {
 				t.Errorf("Text = %q, want \" \" (single space)", out.Text)
 			}
 		})
+	}
+}
+
+// ─── Change 19: waybar status tooltip line ───────────────────────────────────
+
+// realStatus creates a status.Status with a non-zero CachedAt so the tooltip
+// status-line logic recognises it as real data (not an error fallback).
+func realStatus(indicator, claudeCode, description string) status.Status {
+	return status.Status{
+		Indicator:   indicator,
+		ClaudeCode:  claudeCode,
+		Description: description,
+		CachedAt:    fixedNow.Add(-30 * time.Second), // non-zero → real data
+	}
+}
+
+// TestWaybar_Tooltip_NoStatusLine_Operational verifies that when status is
+// operational (Worst == "operational"), the tooltip has NO extra status line.
+func TestWaybar_Tooltip_NoStatusLine_Operational(t *testing.T) {
+	u := makeUsage(42, 18)
+	st := realStatus("none", "operational", "All Systems Operational")
+	out := waybar.Render(u, nil, fixedNow, st)
+	if strings.Contains(out.Tooltip, "<b>Claude status</b>") {
+		t.Errorf("tooltip must NOT contain status line when operational; got: %q", out.Tooltip)
+	}
+}
+
+// TestWaybar_Tooltip_StatusLine_OnIncident verifies that when there is an
+// incident (Worst != "operational"), the tooltip gains a "<b>Claude status</b>: ..."
+// line with the human-readable status.
+func TestWaybar_Tooltip_StatusLine_OnIncident(t *testing.T) {
+	u := makeUsage(42, 18)
+	st := realStatus("minor", "partial_outage", "Partial outage")
+	out := waybar.Render(u, nil, fixedNow, st)
+	if !strings.Contains(out.Tooltip, "<b>Claude status</b>") {
+		t.Errorf("tooltip must contain '<b>Claude status</b>' on incident; got: %q", out.Tooltip)
+	}
+	// The label derivation is shared with the dashboard (status.HumanLabel):
+	// machine strings are humanized (partial_outage → "partial outage").
+	if !strings.Contains(out.Tooltip, "Claude Code: partial outage") {
+		t.Errorf("tooltip must contain the humanized label 'Claude Code: partial outage'; got: %q", out.Tooltip)
+	}
+}
+
+// TestWaybar_Tooltip_StatusLine_NonClaudeCodeIncident verifies that when the
+// incident is elsewhere (Claude Code operational, page indicator minor), the
+// tooltip shows the page description instead of "Claude Code: operational".
+func TestWaybar_Tooltip_StatusLine_NonClaudeCodeIncident(t *testing.T) {
+	u := makeUsage(42, 18)
+	st := realStatus("minor", "operational", "Elevated errors on claude.ai")
+	out := waybar.Render(u, nil, fixedNow, st)
+	if strings.Contains(out.Tooltip, "Claude Code: operational") {
+		t.Errorf("tooltip must not claim 'Claude Code: operational' during an incident; got: %q", out.Tooltip)
+	}
+	if !strings.Contains(out.Tooltip, "Elevated errors on claude.ai") {
+		t.Errorf("tooltip must show the page description for a non-Claude-Code incident; got: %q", out.Tooltip)
+	}
+}
+
+// TestWaybar_Tooltip_StatusLine_Escaped verifies that the status description
+// is Pango-escaped before embedding in the tooltip.
+func TestWaybar_Tooltip_StatusLine_Escaped(t *testing.T) {
+	u := makeUsage(42, 18)
+	// A description with Pango-special characters must be escaped.
+	st := realStatus("minor", "", "All systems <go> & well")
+	out := waybar.Render(u, nil, fixedNow, st)
+	if strings.Contains(out.Tooltip, "All systems <go>") {
+		t.Errorf("tooltip contains unescaped Pango-special chars; got: %q", out.Tooltip)
+	}
+}
+
+// TestWaybar_StatusError_ValidJSON verifies that when status.Cached errors,
+// the waybar output is still valid 3-key JSON with no status line.
+func TestWaybar_StatusError_ValidJSON(t *testing.T) {
+	u := makeUsage(42, 18)
+	// Zero Status passed on error (per spec: on error pass zero Status).
+	out := waybar.Render(u, nil, fixedNow, status.Status{})
+	b, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	for _, key := range []string{"text", "tooltip", "class"} {
+		if _, ok := m[key]; !ok {
+			t.Errorf("key %q missing from JSON output %s", key, b)
+		}
+	}
+	if len(m) != 3 {
+		t.Errorf("expected exactly 3 JSON keys, got %d: %s", len(m), b)
+	}
+	// A zero Status means "no data" (error fallback): no status line may appear.
+	if strings.Contains(out.Tooltip, "<b>Claude status</b>") {
+		t.Errorf("tooltip must NOT have status line for zero Status (error fallback); got: %q", out.Tooltip)
 	}
 }

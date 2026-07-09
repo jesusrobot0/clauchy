@@ -13,6 +13,7 @@ import (
 
 	"github.com/jesusrobot0/clauchy/internal/limits"
 	"github.com/jesusrobot0/clauchy/internal/oauth"
+	"github.com/jesusrobot0/clauchy/internal/status"
 	"github.com/jesusrobot0/clauchy/ui/waybar"
 )
 
@@ -70,7 +71,7 @@ func TestRender_Text_IsSpace(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := waybar.Render(tc.u, tc.err, textTestNow)
+			out := waybar.Render(tc.u, tc.err, textTestNow, status.Status{})
 			if out.Text != " " {
 				t.Errorf("Text = %q, want \" \" (single space); the icon is now painted by CSS background-image", out.Text)
 			}
@@ -158,7 +159,7 @@ func TestTooltip_ExactString(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := waybar.Render(tc.u, tc.err, tooltipNow)
+			out := waybar.Render(tc.u, tc.err, tooltipNow, status.Status{})
 			if out.Tooltip != tc.wantTooltip {
 				t.Errorf("Tooltip mismatch for %q:\ngot:  %q\nwant: %q", tc.name, out.Tooltip, tc.wantTooltip)
 			}

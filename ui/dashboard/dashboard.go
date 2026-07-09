@@ -24,6 +24,7 @@ import (
 
 	"github.com/jesusrobot0/clauchy/internal/limits"
 	"github.com/jesusrobot0/clauchy/internal/severity"
+	"github.com/jesusrobot0/clauchy/internal/status"
 	"github.com/jesusrobot0/clauchy/internal/transcript"
 	"github.com/jesusrobot0/clauchy/ui/theme"
 )
@@ -35,6 +36,11 @@ import (
 type Deps struct {
 	FetchLimits func() (limits.Usage, error)
 	FetchStats  func() (transcript.Stats, error)
+	// FetchStatus fetches the Claude status page summary. It should use
+	// status.Cached with a 180s TTL so the 5s dashboard tick mostly cache-hits.
+	// On fetch failure, return the error; the dashboard renders nothing on the
+	// left side of the footer in that case.
+	FetchStatus func() (status.Status, error)
 }
 
 // LimitsMsg carries the result of a FetchLimits call.
@@ -51,10 +57,17 @@ type StatsMsg struct {
 	Err   error
 }
 
+// StatusMsg carries the result of a FetchStatus call.
+// Exported so tests can send it directly to Model.Update.
+type StatusMsg struct {
+	Status status.Status
+	Err    error
+}
+
 // TickMsg triggers a periodic refresh. Exported for tests.
 type TickMsg time.Time
 
-// AnimTickMsg triggers a footer rainbow animation frame advance.
+// AnimTickMsg triggers a header brand-animation frame advance.
 // Issued every ~150ms; no in-flight guard needed (it is cheap and idempotent).
 // Exported so tests can send it directly to Model.Update.
 type AnimTickMsg struct{}
@@ -76,8 +89,17 @@ type Model struct {
 	width, height int
 	frame         int // animation frame counter, incremented by each AnimTickMsg
 
+	// syncPulseFrames is a countdown that keeps the header animation alive for
+	// at least ~600ms (4 anim frames × 150ms) after a sync starts. Set to 4
+	// whenever a fetch is issued; decremented on each AnimTickMsg; animation
+	// is active while loadingLimits || loadingStats || syncPulseFrames > 0.
+	// This prevents an ugly single-frame flicker when a cache hit resolves
+	// before the first AnimTickMsg arrives.
+	syncPulseFrames int
+
 	loadingLimits bool
 	loadingStats  bool
+	loadingStatus bool
 
 	limits    limits.Usage
 	limitsErr error
@@ -86,6 +108,12 @@ type Model struct {
 	stats    transcript.Stats
 	statsErr error
 	hasStats bool
+
+	// statusData holds the latest Claude status page result.
+	// hasStatus is true once a StatusMsg has been received without error.
+	statusData status.Status
+	statusErr  error
+	hasStatus  bool
 
 	lastUpdated time.Time
 }
@@ -107,37 +135,45 @@ func NewColorful(d Deps, p theme.Palette, now func() time.Time, plan string) Mod
 }
 
 // newWithScheme is the internal constructor shared by New and NewColorful.
+// loadingStatus starts true only when a FetchStatus seam is wired: with a nil
+// dep, Init never issues a status fetch, so a true flag would never clear and
+// the header animation would run forever.
 func newWithScheme(d Deps, p theme.Palette, s Scheme, now func() time.Time, plan string) Model {
 	return Model{
-		deps:          d,
-		palette:       p,
-		scheme:        s,
-		now:           now,
-		plan:          plan,
-		loadingLimits: true,
-		loadingStats:  true,
+		deps:            d,
+		palette:         p,
+		scheme:          s,
+		now:             now,
+		plan:            plan,
+		loadingLimits:   true,
+		loadingStats:    true,
+		loadingStatus:   d.FetchStatus != nil,
+		syncPulseFrames: 4, // guarantee at least 4 anim frames of animation from the initial fetch pair
 	}
 }
 
 // ─── Exported accessors for testing ──────────────────────────────────────────
 
-func (m Model) LimitsErr() error { return m.limitsErr }
-func (m Model) StatsErr() error  { return m.statsErr }
-func (m Model) HasLimits() bool  { return m.hasLimits }
-func (m Model) HasStats() bool   { return m.hasStats }
-func (m Model) Width() int       { return m.width }
-func (m Model) Height() int      { return m.height }
-func (m Model) Frame() int       { return m.frame }
+func (m Model) LimitsErr() error     { return m.limitsErr }
+func (m Model) StatsErr() error      { return m.statsErr }
+func (m Model) HasLimits() bool      { return m.hasLimits }
+func (m Model) HasStats() bool       { return m.hasStats }
+func (m Model) HasStatus() bool      { return m.hasStatus }
+func (m Model) Width() int           { return m.width }
+func (m Model) Height() int          { return m.height }
+func (m Model) Frame() int           { return m.frame }
+func (m Model) SyncPulseFrames() int { return m.syncPulseFrames }
 
 // ─── Bubbletea interface ──────────────────────────────────────────────────────
 
 // Init issues the initial fetch commands and starts the 5s tick timer
-// and the 150ms animation tick timer for the footer rainbow.
+// and the 150ms animation tick timer for the header brand animation.
 // The loading flags are already set by New(); Init only issues the commands.
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		fetchLimitsCmd(m.deps),
 		fetchStatsCmd(m.deps),
+		fetchStatusCmd(m.deps),
 		tickCmd(),
 		animTickCmd(),
 	)
@@ -163,16 +199,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastUpdated = m.now()
 		return m, nil
 
+	case StatusMsg:
+		m.loadingStatus = false
+		m.statusData = msg.Status
+		m.statusErr = msg.Err
+		m.hasStatus = msg.Err == nil
+		return m, nil
+
 	case TickMsg:
 		var cmds []tea.Cmd
 		// In-flight guard: only re-issue a fetch when its loading flag is clear.
+		var issuedFetch bool
 		if !m.loadingLimits {
 			m.loadingLimits = true
+			issuedFetch = true
 			cmds = append(cmds, fetchLimitsCmd(m.deps))
 		}
 		if !m.loadingStats {
 			m.loadingStats = true
+			issuedFetch = true
 			cmds = append(cmds, fetchStatsCmd(m.deps))
+		}
+		// The status branch also requires a wired FetchStatus dep: with a nil
+		// dep there is no fetch to issue, so neither the loading flag nor the
+		// sync pulse may be touched for it.
+		if !m.loadingStatus && m.deps.FetchStatus != nil {
+			m.loadingStatus = true
+			issuedFetch = true
+			cmds = append(cmds, fetchStatusCmd(m.deps))
+		}
+		// Reset the minimum-pulse countdown whenever a new sync starts.
+		if issuedFetch {
+			m.syncPulseFrames = 4
 		}
 		cmds = append(cmds, tickCmd())
 		return m, tea.Batch(cmds...)
@@ -181,6 +239,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Advance the animation frame counter and re-issue the tick.
 		// No in-flight guard needed — the tick is cheap and idempotent.
 		m.frame++
+		// Decrement the minimum-pulse countdown. When a sync started just before
+		// a fast cache-hit response, syncPulseFrames keeps the animation alive
+		// for at least ~600ms (4 frames × 150ms) so there is no single-frame flicker.
+		if m.syncPulseFrames > 0 {
+			m.syncPulseFrames--
+		}
 		return m, animTickCmd()
 
 	case tea.KeyMsg:
@@ -229,12 +293,15 @@ type Scheme struct {
 	// Error is the color for error messages (kept red in both schemes —
 	// errors must alarm regardless of color mode).
 	Error string
+	// Warning is the color for minor-incident status text in the footer
+	// (kept yellow in both schemes — incident colors are semantic, like Error).
+	Warning string
 	// Total is the color for the big-digit Total block in Today.
 	Total string
 	// ColorfulBars reports whether limit-bar fill should be severity-mapped
 	// (ColorfulScheme) or fixed to BarFill (MonochromeScheme).
 	ColorfulBars bool
-	// GrayscaleAnim switches the footer "clauchy" animation from the rainbow
+	// GrayscaleAnim switches the header "clauchy" animation from the rainbow
 	// hue wave to a white/gray lightness wave, so the animation matches the
 	// monochrome look while keeping the product signature alive.
 	GrayscaleAnim bool
@@ -243,8 +310,9 @@ type Scheme struct {
 // MonochromeScheme returns the default scheme: white/gray tones, no Sky hue,
 // matching the user's original black-and-white reference design.
 // Errors keep red because they SHOULD alarm regardless of color mode.
-// The footer "clauchy" rainbow animation is NOT controlled by the scheme —
-// it is always active (product signature).
+// The header "clauchy" animation is sync-gated: active only while data is
+// loading (loadingLimits || loadingStats || loadingStatus || syncPulseFrames > 0);
+// when idle the title renders as plain bold terminal-default (Change 19).
 func MonochromeScheme() Scheme {
 	return Scheme{
 		SectionTitle:  "",        // terminal default bold-white
@@ -253,9 +321,10 @@ func MonochromeScheme() Scheme {
 		Subtle:        "#6c7086", // Catppuccin Overlay0 — dim gray hints
 		Border:        "#585b70", // Catppuccin Surface2 — dividers
 		Error:         "#f38ba8", // Catppuccin Red — keep alarm color
+		Warning:       "#f9e2af", // Catppuccin Yellow — semantic incident color, kept in mono
 		Total:         "",        // terminal default foreground (white)
 		ColorfulBars:  false,
-		GrayscaleAnim: true, // footer wave in white/gray, not rainbow
+		GrayscaleAnim: true, // header wave in white/gray, not rainbow
 	}
 }
 
@@ -269,6 +338,7 @@ func ColorfulScheme() Scheme {
 		Subtle:       "#6c7086", // Catppuccin Overlay0
 		Border:       "#585b70", // Catppuccin Surface2
 		Error:        "#f38ba8", // Catppuccin Red
+		Warning:      "#f9e2af", // Catppuccin Yellow
 		Total:        "#89dceb", // Sky
 		ColorfulBars: true,
 	}
@@ -282,7 +352,7 @@ func ColorfulScheme() Scheme {
 //
 // Card anatomy (no outer frame — the floating terminal window provides one):
 //
-//	CLAUDE CODE
+//	clauchy                                                          Max 20x
 //
 //	Session 22%   Week 31%   Fable 24%         Resets Jul 9, 4:00pm
 //	───────────────────────────────────┬──────────────────────────────────
@@ -292,13 +362,14 @@ func ColorfulScheme() Scheme {
 //	                                   │ This Week
 //	Total               84.4M          │ 240.0M tokens              ~$463
 //	API equiv.          ~$167          │                             2d streak
-//	────────────────────────────────────────────────────────────────────────────
-//	clauchy                                    est. costs · pricing from Jul 7, 2026
+//
+//	● operational                est. costs · pricing from Jul 7, 2026 · updated 15:04
 //
 // Internal structure:
+//   - Header: animated-while-syncing "clauchy" brand, plan label right-aligned.
 //   - Vertical column divider "│" between Today and the right column.
 //   - Column divider line uses ─ with a ┬ at the divider column.
-//   - Footer: full-width footer bar with animated "clauchy" on the left.
+//   - Footer: Claude status on the left, pricing/updated info on the right.
 func (m Model) View() string {
 	outerWidth := m.width
 	if m.width == 0 || m.width < 72 {
@@ -368,17 +439,35 @@ func (m Model) View() string {
 	return strings.Join(lines, "\n")
 }
 
-// viewHeader renders the bold "CLAUDE CODE" title.
+// viewHeader renders the "clauchy" brand title (Change 19).
+// While syncing (loadingLimits || loadingStats || loadingStatus || syncPulseFrames > 0)
+// the title is animated via RainbowText (colorful scheme) or GrayscaleText (mono scheme).
+// When idle it renders static BOLD terminal-default (no per-letter color codes).
 // When a plan label (e.g. "Max 20x") is set it is shown right-aligned on
 // the same row in the scheme's Subtle color. The two sides are separated by
 // enough spaces to fill contentWidth exactly.
 func (m Model) viewHeader(contentWidth int) string {
-	title := lipgloss.NewStyle().Bold(true).Render("CLAUDE CODE")
+	const brand = "clauchy"
+	syncing := m.loadingLimits || m.loadingStats || m.loadingStatus || m.syncPulseFrames > 0
+
+	var title string
+	if syncing {
+		// Animated: per-letter color wave matching the scheme.
+		if m.scheme.GrayscaleAnim {
+			title = GrayscaleText(brand, m.frame)
+		} else {
+			title = RainbowText(brand, m.frame)
+		}
+	} else {
+		// Idle: plain bold, terminal-default foreground.
+		title = lipgloss.NewStyle().Bold(true).Render(brand)
+	}
+
 	if m.plan == "" {
 		return title
 	}
 	planRendered := lipgloss.NewStyle().Foreground(lipgloss.Color(m.scheme.Subtle)).Render(m.plan)
-	titleWidth := lipgloss.Width(title)
+	titleWidth := len(brand) // brand is ASCII-only, so byte length == visual width
 	planWidth := lipgloss.Width(planRendered)
 	gap := contentWidth - titleWidth - planWidth
 	if gap < 1 {
@@ -681,17 +770,27 @@ func (m Model) buildRightContent(colWidth int) string {
 	return strings.Join(parts, "\n")
 }
 
-// viewFooterContent builds the left+right-aligned footer text.
-// The left word "clauchy" is rendered with a per-frame rainbow animation.
+// viewFooterContent builds the left+right-aligned footer text (Change 19).
+// The left side shows Claude status page data:
+//   - When FetchStatus errored (statusErr != nil), status has not arrived yet
+//     (hasStatus == false), or the Status is a zero value (CachedAt.IsZero() —
+//     "no data", same gate as waybar's buildTooltip) → empty left side.
+//   - When operational (Worst == "operational") → "● operational" in Subtle
+//     color (the short form always fits at 80 cols beside the pricing text).
+//   - When incident (Worst == minor/major/critical) → "⚠ " + status.HumanLabel
+//     in the scheme Warning color for minor, Error color for major/critical.
+//   - When Stale → append " (cached)".
+//
+// The right side (est. costs · pricing · updated) is styled with Subtle HERE,
+// not by the outer footer wrapper: the left segment's Render ends with an SGR
+// reset that would otherwise kill the wrapper's style mid-row and leave the
+// right side uncolored.
 // contentWidth is the available text area inside the footer's padding.
 func (m Model) viewFooterContent(contentWidth int) string {
-	// "clauchy" gets the animated rainbow; the rest of the footer stays in the scheme's Subtle color.
-	left := RainbowText("clauchy", m.frame)
-	if m.scheme.GrayscaleAnim {
-		left = GrayscaleText("clauchy", m.frame)
-	}
-	// lipgloss.Width strips ANSI so we can calculate layout from the raw word width.
-	leftW := len("clauchy")
+	subtle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.scheme.Subtle))
+
+	var left string
+	var leftW int
 
 	var rightParts []string
 	if m.stats.PricingDate != "" {
@@ -700,9 +799,48 @@ func (m Model) viewFooterContent(contentWidth int) string {
 	if !m.lastUpdated.IsZero() {
 		rightParts = append(rightParts, "updated "+m.lastUpdated.Format("15:04"))
 	}
-	right := strings.Join(rightParts, " · ")
+	rightRaw := strings.Join(rightParts, " · ")
+	rightW := lipgloss.Width(rightRaw)
+	right := rightRaw
+	if rightRaw != "" {
+		right = subtle.Render(rightRaw)
+	}
 
-	rightW := lipgloss.Width(right)
+	// Build the status left side only when REAL status data arrived: a zero
+	// CachedAt means "no data" (zero-value fallback), never an incident.
+	if m.hasStatus && m.statusErr == nil && !m.statusData.CachedAt.IsZero() {
+		st := m.statusData
+		worst := status.Worst(st)
+
+		var raw string
+		var leftStyle lipgloss.Style
+
+		switch worst {
+		case "operational":
+			raw = "● operational"
+			leftStyle = subtle
+		case "minor":
+			raw = "⚠ " + status.HumanLabel(st)
+			leftStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(m.scheme.Warning))
+		default: // "major" or "critical"
+			raw = "⚠ " + status.HumanLabel(st)
+			leftStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(m.scheme.Error))
+		}
+
+		if st.Stale {
+			raw += " (cached)"
+		}
+
+		candidateW := lipgloss.Width(raw)
+		// Only show the left side when it fits alongside the right side with at least 1 space gap.
+		if candidateW+1+rightW <= contentWidth {
+			left = leftStyle.Render(raw)
+			leftW = candidateW
+		}
+		// If it doesn't fit, left stays "" and leftW stays 0; right side fills the row.
+	}
+	// If no status data: left = "" and leftW = 0 → right side fills the row.
+
 	g := contentWidth - leftW - rightW
 	if g < 1 {
 		g = 1
@@ -1185,6 +1323,17 @@ func fetchStatsCmd(d Deps) tea.Cmd {
 	return func() tea.Msg {
 		s, err := d.FetchStats()
 		return StatsMsg{Stats: s, Err: err}
+	}
+}
+
+func fetchStatusCmd(d Deps) tea.Cmd {
+	if d.FetchStatus == nil {
+		// FetchStatus not wired (e.g. legacy tests without status dep): no-op.
+		return nil
+	}
+	return func() tea.Msg {
+		st, err := d.FetchStatus()
+		return StatusMsg{Status: st, Err: err}
 	}
 }
 

@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -39,6 +40,7 @@ import (
 	"github.com/jesusrobot0/clauchy/internal/oauth"
 	"github.com/jesusrobot0/clauchy/internal/paths"
 	"github.com/jesusrobot0/clauchy/internal/pricing"
+	"github.com/jesusrobot0/clauchy/internal/status"
 	"github.com/jesusrobot0/clauchy/internal/transcript"
 	"github.com/jesusrobot0/clauchy/ui/dashboard"
 	"github.com/jesusrobot0/clauchy/ui/theme"
@@ -103,11 +105,13 @@ func runWaybar() {
 
 	c := cache.New(p.CacheDir)
 
-	// Two separate HTTP clients per the critical wiring invariant (§1 / design):
+	// Three separate HTTP clients per the critical wiring invariant (§1 / design):
 	// - oauthClient: 20s timeout for the token refresh cold-boot path.
 	// - limitsClient: bounded by the ctx deadline (FetchTimeout = 2.5s).
+	// - statusClient: bounded by status.FetchTimeout (2.5s).
 	oauthClient := &http.Client{Timeout: oauth.RefreshTimeout}
 	limitsClient := &http.Client{}
+	statusClient := &http.Client{}
 
 	oauthCfg := oauth.Config{
 		CredentialsPath: p.CredentialsFile,
@@ -119,7 +123,7 @@ func runWaybar() {
 		return oauth.Token(oauthCfg, oauthClient, time.Now())
 	}
 
-	u, err := limits.Cached(
+	u, limitsErr := limits.Cached(
 		context.Background(),
 		c,
 		limitsClient,
@@ -128,7 +132,28 @@ func runWaybar() {
 		time.Now, // re-sampled closure — NOT a captured value
 	)
 
-	out := waybar.Render(u, err, time.Now())
+	// Fetch Claude status page. The 180s TTL means the 60s Waybar poll mostly
+	// cache-hits. A status failure must NEVER break waybar output — on error
+	// pass a zero Status so Render omits the status tooltip line.
+	// Skipped entirely on credential-class limits errors: Render early-returns
+	// the "Run claude to log in" payload without a tooltip, so fetching status
+	// would be pure latency waste.
+	var st status.Status
+	if !isCredentialErr(limitsErr) {
+		var stErr error
+		st, stErr = status.Cached(
+			context.Background(),
+			c,
+			statusClient,
+			"https://status.claude.com",
+			time.Now,
+		)
+		if stErr != nil {
+			st = status.Status{} // zero → Render appends no status line
+		}
+	}
+
+	out := waybar.Render(u, limitsErr, time.Now(), st)
 	if encErr := json.NewEncoder(os.Stdout).Encode(out); encErr != nil {
 		// Encoding failure is vanishingly unlikely; exit non-zero for debuggability.
 		fmt.Fprintf(os.Stderr, "clauchy waybar: encode: %v\n", encErr)
@@ -136,10 +161,18 @@ func runWaybar() {
 	}
 }
 
+// isCredentialErr reports whether err is a credential-class limits error —
+// the same set waybar.Render maps to its "Run claude to log in" early return.
+func isCredentialErr(err error) bool {
+	return errors.Is(err, oauth.ErrNoCredentials) ||
+		errors.Is(err, oauth.ErrInvalidCredentials) ||
+		errors.Is(err, oauth.ErrRefreshRejected)
+}
+
 // emitWaybarError writes a safe fallback JSON line to stdout and exits 0.
 // Used when a pre-render error occurs so Waybar never sees empty output.
 func emitWaybarError(_ error) {
-	out := waybar.Render(limits.Usage{}, nil, time.Now())
+	out := waybar.Render(limits.Usage{}, nil, time.Now(), status.Status{})
 	json.NewEncoder(os.Stdout).Encode(out) //nolint:errcheck
 }
 
@@ -157,6 +190,7 @@ func runDashboard(colorful bool) {
 
 	oauthClient := &http.Client{Timeout: oauth.RefreshTimeout}
 	limitsClient := &http.Client{}
+	statusClient := &http.Client{}
 
 	table, err := pricing.LoadOverride(p.PricingOverride, pricing.Builtin())
 	if err != nil {
@@ -187,6 +221,17 @@ func runDashboard(colorful bool) {
 			// time.Now() and time.Local are re-sampled on each call so that a
 			// long-running dashboard always uses the current date/location.
 			return transcript.Aggregate(p.TranscriptRoots, table, time.Now(), time.Local)
+		},
+		FetchStatus: func() (status.Status, error) {
+			// Shares the same cache instance as limits — the 180s TTL means
+			// the 5s dashboard tick mostly cache-hits.
+			return status.Cached(
+				context.Background(),
+				c,
+				statusClient,
+				"https://status.claude.com",
+				time.Now,
+			)
 		},
 	}
 

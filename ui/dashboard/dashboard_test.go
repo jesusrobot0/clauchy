@@ -2,10 +2,10 @@ package dashboard_test
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -13,10 +13,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/exp/golden"
-	"github.com/charmbracelet/x/exp/teatest"
 	"github.com/muesli/termenv"
 
 	"github.com/jesusrobot0/clauchy/internal/limits"
+	"github.com/jesusrobot0/clauchy/internal/status"
 	"github.com/jesusrobot0/clauchy/internal/transcript"
 	"github.com/jesusrobot0/clauchy/ui/dashboard"
 	"github.com/jesusrobot0/clauchy/ui/theme"
@@ -43,6 +43,16 @@ func stubDeps(u limits.Usage, uErr error, s transcript.Stats, sErr error) dashbo
 	return dashboard.Deps{
 		FetchLimits: func() (limits.Usage, error) { return u, uErr },
 		FetchStats:  func() (transcript.Stats, error) { return s, sErr },
+		FetchStatus: func() (status.Status, error) { return status.Status{}, nil },
+	}
+}
+
+// stubDepsWithStatus returns a Deps with a specific status fetch stub.
+func stubDepsWithStatus(u limits.Usage, uErr error, s transcript.Stats, sErr error, st status.Status, stErr error) dashboard.Deps {
+	return dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) { return u, uErr },
+		FetchStats:  func() (transcript.Stats, error) { return s, sErr },
+		FetchStatus: func() (status.Status, error) { return st, stErr },
 	}
 }
 
@@ -101,7 +111,7 @@ func sampleStats() transcript.Stats {
 // ─── Plan label in header ────────────────────────────────────────────────────
 
 // TestViewHeader_PlanLabel verifies that when a non-empty plan label is
-// supplied to New(), the header row contains both the title and the plan label.
+// supplied to New(), the header row contains both the brand title and the plan label.
 // This is a unit-level check: we render View() directly with a fixed size and
 // assert the plan string appears in the output.
 func TestViewHeader_PlanLabel(t *testing.T) {
@@ -116,9 +126,9 @@ func TestViewHeader_PlanLabel(t *testing.T) {
 		t.Errorf("View() does not contain plan label %q\nfull output:\n%s", "Max 20x", output)
 	}
 
-	// The title must still be present.
-	if !strings.Contains(stripANSI(output), "CLAUDE CODE") {
-		t.Errorf("View() does not contain the header title\nfull output:\n%s", output)
+	// The brand title "clauchy" must be present (Change 19: replaces "CLAUDE CODE").
+	if !strings.Contains(stripANSI(output), "clauchy") {
+		t.Errorf("View() does not contain the header brand 'clauchy'\nfull output:\n%s", output)
 	}
 }
 
@@ -131,8 +141,8 @@ func TestViewHeader_EmptyPlan(t *testing.T) {
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
 	output := m2.(dashboard.Model).View()
 
-	if !strings.Contains(stripANSI(output), "CLAUDE CODE") {
-		t.Errorf("View() with empty plan does not contain header title\nfull output:\n%s", output)
+	if !strings.Contains(stripANSI(output), "clauchy") {
+		t.Errorf("View() with empty plan does not contain header brand 'clauchy'\nfull output:\n%s", output)
 	}
 }
 
@@ -513,7 +523,10 @@ func stripANSI(s string) string {
 // ─── UI polish: footer-pinned + padding + top margin (RED tests) ─────────────
 
 // TestView_FooterPinnedToBottom verifies that when m.height > 0 the rendered
-// View() has exactly m.height lines and the footer content appears on the last line.
+// View() has exactly m.height lines and the footer row is the last line.
+// Change 19: the footer left side now shows status data (not "clauchy"), so we
+// check the last line is a footer row by verifying the overall line count and that
+// the header "clauchy" brand appears on line 1 (not the footer).
 func TestView_FooterPinnedToBottom(t *testing.T) {
 	deps := stubDeps(limits.Usage{}, nil, transcript.Stats{}, nil)
 	m := dashboard.New(deps, testPalette, fixedNowFn, "")
@@ -521,7 +534,7 @@ func TestView_FooterPinnedToBottom(t *testing.T) {
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
 	output := m2.(dashboard.Model).View()
 
-	// Split on newlines (teatest may append trailing content; use raw View output)
+	// Split on newlines
 	lines := strings.Split(output, "\n")
 
 	// Must have exactly testHeight lines
@@ -529,10 +542,12 @@ func TestView_FooterPinnedToBottom(t *testing.T) {
 		t.Errorf("View() has %d lines, want %d (testHeight)", len(lines), testHeight)
 	}
 
-	// The last line must contain the footer text ("clauchy")
-	lastLine := stripANSI(lines[len(lines)-1])
-	if !strings.Contains(lastLine, "clauchy") {
-		t.Errorf("last line does not contain footer text 'clauchy', got: %q", lastLine)
+	// The header "clauchy" brand must appear at line index 1 (after the blank top margin).
+	if len(lines) >= 2 {
+		headerLine := stripANSI(lines[1])
+		if !strings.Contains(headerLine, "clauchy") {
+			t.Errorf("line[1] (header) does not contain 'clauchy', got: %q", headerLine)
+		}
 	}
 }
 
@@ -545,17 +560,17 @@ func TestView_HorizontalPadding3(t *testing.T) {
 	output := m2.(dashboard.Model).View()
 
 	lines := strings.Split(output, "\n")
-	// Find the header line containing "CLAUDE CODE"
+	// Find the header line containing "clauchy" (brand, Change 19).
 	for _, line := range lines {
 		stripped := stripANSI(line)
-		if strings.Contains(stripped, "CLAUDE CODE") {
+		if strings.Contains(stripped, "clauchy") && !strings.Contains(stripped, "est.") {
 			if !strings.HasPrefix(stripped, "   ") {
 				t.Errorf("header line does not start with 3-space left padding: %q", stripped)
 			}
 			return
 		}
 	}
-	t.Error("header line 'CLAUDE CODE' not found in View() output")
+	t.Error("header line 'clauchy' not found in View() output")
 }
 
 // TestView_TopMarginBlankLine verifies that the first non-empty visual line
@@ -705,28 +720,12 @@ func TestModel_Update_WindowSizeMsg_StoresDims(t *testing.T) {
 	}
 }
 
-// ─── Golden tests (teatest) ───────────────────────────────────────────────────
-
-// captureView runs a model through teatest, captures the final rendered output,
-// and returns it. The model must already have correct state before calling this.
-func captureView(t *testing.T, m tea.Model) []byte {
-	t.Helper()
-	tm := teatest.NewTestModel(
-		t,
-		m,
-		teatest.WithInitialTermSize(testWidth, testHeight),
-	)
-
-	// Send quit immediately to capture the initial render state
-	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
-	tm.WaitFinished(t, teatest.WithFinalTimeout(5*time.Second))
-
-	out, err := io.ReadAll(tm.FinalOutput(t))
-	if err != nil {
-		t.Fatalf("read final output: %v", err)
-	}
-	return out
-}
+// ─── Golden tests ─────────────────────────────────────────────────────────────
+//
+// All goldens are rendered DIRECTLY from Model.View() with every data message
+// (LimitsMsg / StatsMsg / StatusMsg) delivered manually. teatest is not used
+// for static goldens: its event loop races asynchronously-delivered messages
+// against the quit key, making the captured bytes non-deterministic.
 
 func TestView_Loading_Golden(t *testing.T) {
 	// Loading golden is rendered directly from Model.View() to avoid
@@ -749,12 +748,13 @@ func TestView_FullData_Golden(t *testing.T) {
 	// right-aligned plan rendering in the header.
 	m := dashboard.New(deps, testPalette, fixedNowFn, "Max 20x")
 
-	// Populate the model with data via Update, then set a fixed size
+	// Deliver every data message manually, then render View() directly.
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
 	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
 	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: nil})
 
-	got := captureView(t, m4)
+	got := []byte(m5.(dashboard.Model).View())
 	golden.RequireEqual(t, got)
 }
 
@@ -766,8 +766,9 @@ func TestView_Degraded_Golden(t *testing.T) {
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
 	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: limits.Usage{}, Err: limits.ErrTransient})
 	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: nil})
 
-	got := captureView(t, m4)
+	got := []byte(m5.(dashboard.Model).View())
 	golden.RequireEqual(t, got)
 }
 
@@ -789,9 +790,8 @@ func TestScheme_Monochrome_NoSkyHex(t *testing.T) {
 	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
 
 	output := m4.View()
-	// Strip the footer rainbow (it is always colorful) and check the rest.
-	// We look for the Sky hex in limit bars / section headers.
-	// Because the rainbow footer embeds arbitrary hues we exclude the last line.
+	// Exclude the last line (footer) to keep the test focused on bars and
+	// section headers; the footer renders status/pricing text in Subtle.
 	lines := strings.Split(output, "\n")
 	mainContent := strings.Join(lines[:len(lines)-1], "\n")
 	if strings.Contains(mainContent, skyHex) {
@@ -823,12 +823,13 @@ func TestView_Colorful_FullData_Golden(t *testing.T) {
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
 	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
 	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: nil})
 
-	got := captureView(t, m4)
+	got := []byte(m5.(dashboard.Model).View())
 	golden.RequireEqual(t, got)
 }
 
-// ─── GrayscaleText (monochrome footer animation) ─────────────────────────────
+// ─── GrayscaleText (monochrome header animation) ─────────────────────────────
 
 func TestGrayscaleText_Deterministic(t *testing.T) {
 	got1 := dashboard.GrayscaleText("clauchy", 0)
@@ -1025,6 +1026,8 @@ func TestView_FullData_ExactHeight(t *testing.T) {
 
 // TestView_Loading_ExactHeight verifies that the loading state also renders
 // EXACTLY testHeight lines and the footer is bottom-anchored.
+// Change 19: "clauchy" is now in the header (line[1]), not the footer.
+// The footer left side shows status data (empty while loading).
 func TestView_Loading_ExactHeight(t *testing.T) {
 	deps := stubDeps(limits.Usage{}, nil, transcript.Stats{}, nil)
 	m := dashboard.New(deps, testPalette, fixedNowFn, "")
@@ -1037,9 +1040,511 @@ func TestView_Loading_ExactHeight(t *testing.T) {
 			testWidth, testHeight, len(lines), testHeight)
 	}
 
-	// Footer must be on the last line.
-	lastLine := stripANSI(lines[len(lines)-1])
-	if !strings.Contains(lastLine, "clauchy") {
-		t.Errorf("last line does not contain footer text 'clauchy', got: %q", lastLine)
+	// The header "clauchy" brand must appear at line index 1.
+	if len(lines) >= 2 {
+		headerLine := stripANSI(lines[1])
+		if !strings.Contains(headerLine, "clauchy") {
+			t.Errorf("line[1] (header) does not contain 'clauchy', got: %q", headerLine)
+		}
+	}
+}
+
+// ─── Change 18: header animation as sync indicator ───────────────────────────
+
+// countColorCodes counts the number of distinct truecolor RGB escape sequences
+// in a string. Each per-letter color in the animated header contributes one.
+func countColorCodes(s string) int {
+	re := regexp.MustCompile(`\x1b\[38;2;\d+;\d+;\d+m`)
+	return len(re.FindAllString(s, -1))
+}
+
+// TestHeaderAnimation_WhileSyncing verifies that a fresh model (loadingLimits=true,
+// loadingStats=true) renders the header "clauchy" brand with per-letter ANSI color
+// sequences — the animated form is active while a sync is in progress (Change 19).
+func TestHeaderAnimation_WhileSyncing(t *testing.T) {
+	deps := stubDeps(limits.Usage{}, nil, transcript.Stats{}, nil)
+	// New() sets loadingLimits=true, loadingStats=true, loadingStatus=true → syncing active.
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	output := m2.(dashboard.Model).View()
+	lines := strings.Split(output, "\n")
+	// Header is at line index 1 (line 0 is blank top margin).
+	if len(lines) < 2 {
+		t.Fatal("View() has fewer than 2 lines")
+	}
+	headerLine := lines[1]
+	// The animated header has one color code per letter (7 for "clauchy").
+	n := countColorCodes(headerLine)
+	if n < 7 {
+		t.Errorf("header line while syncing has %d color escapes, want >=7 (one per letter of 'clauchy'); got: %q", n, headerLine)
+	}
+}
+
+// TestHeaderAnimation_StaticWhenIdle verifies that once all data messages have
+// arrived AND at least 4 AnimTickMsgs have been sent (exhausting the minimum
+// pulse countdown), the header "clauchy" brand renders statically bold with no
+// per-letter multi-color animation (Change 19).
+func TestHeaderAnimation_StaticWhenIdle(t *testing.T) {
+	deps := stubDeps(sampleUsage(), nil, sampleStats(), nil)
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	// Deliver all data messages so loading flags clear.
+	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
+	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: nil})
+	// Exhaust the 4-frame minimum pulse countdown.
+	var cur tea.Model = m5
+	for i := 0; i < 4; i++ {
+		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
+	}
+	output := cur.(dashboard.Model).View()
+	lines := strings.Split(output, "\n")
+	if len(lines) < 2 {
+		t.Fatal("View() has fewer than 2 lines")
+	}
+	headerLine := lines[1]
+
+	// When idle the header "clauchy" renders as plain bold (no truecolor RGB escapes).
+	n := countColorCodes(headerLine)
+	if n > 0 {
+		t.Errorf("header line when idle has %d truecolor escapes, want 0 (plain bold); got: %q", n, headerLine)
+	}
+	// The "clauchy" text must still appear.
+	if !strings.Contains(stripANSI(headerLine), "clauchy") {
+		t.Errorf("header line when idle missing 'clauchy': %q", stripANSI(headerLine))
+	}
+}
+
+// TestHeaderAnimation_MinimumPulse verifies that when fetch results arrive
+// immediately after init (simulating a cache hit), the header animation remains
+// active until the 4-frame countdown is exhausted (Change 19).
+// After <4 AnimTickMsgs the header must still be animated; after 4+ it goes static.
+func TestHeaderAnimation_MinimumPulse(t *testing.T) {
+	deps := stubDeps(sampleUsage(), nil, sampleStats(), nil)
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	// Deliver all data immediately (simulating cache hits before any anim tick).
+	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
+	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: nil})
+
+	// After 3 AnimTickMsgs (< 4) the pulse countdown is not yet exhausted
+	// → header animation must still be active.
+	var cur tea.Model = m5
+	for i := 0; i < 3; i++ {
+		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
+	}
+	outputMid := cur.(dashboard.Model).View()
+	linesMid := strings.Split(outputMid, "\n")
+	if len(linesMid) < 2 {
+		t.Fatal("View() has fewer than 2 lines")
+	}
+	headerMid := linesMid[1]
+	if countColorCodes(headerMid) < 7 {
+		t.Errorf("header after 3 AnimTicks (mid-pulse) has <7 color codes — animation must still be active; got: %q", headerMid)
+	}
+
+	// After 1 more AnimTickMsg (total 4) the countdown is exhausted → static header.
+	cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
+	outputDone := cur.(dashboard.Model).View()
+	linesDone := strings.Split(outputDone, "\n")
+	if len(linesDone) < 2 {
+		t.Fatal("View() has fewer than 2 lines")
+	}
+	headerDone := linesDone[1]
+	if countColorCodes(headerDone) > 0 {
+		t.Errorf("header after 4 AnimTicks (pulse done) still animated (%d color codes); want 0 static", countColorCodes(headerDone))
+	}
+}
+
+// ─── Change 19: brand header + Claude status indicator ───────────────────────
+
+// TestViewHeader_BrandIsClauchy verifies the header now shows "clauchy"
+// (the product brand) instead of "CLAUDE CODE".
+func TestViewHeader_BrandIsClauchy(t *testing.T) {
+	deps := stubDeps(limits.Usage{}, nil, transcript.Stats{}, nil)
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	output := stripANSI(m2.(dashboard.Model).View())
+
+	if strings.Contains(output, "CLAUDE CODE") {
+		t.Error("header must not contain 'CLAUDE CODE' (superseded by Change 19)")
+	}
+	if !strings.Contains(output, "clauchy") {
+		t.Error("header must contain 'clauchy' (product brand)")
+	}
+}
+
+// TestViewHeader_NoPlanLabel verifies empty plan doesn't break the brand header.
+func TestViewHeader_NoPlanLabel_BrandPresent(t *testing.T) {
+	deps := stubDeps(limits.Usage{}, nil, transcript.Stats{}, nil)
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	output := stripANSI(m2.(dashboard.Model).View())
+
+	// "clauchy" appears in the header row (first non-blank line).
+	lines := strings.Split(output, "\n")
+	// line[0] is blank top margin; line[1] is the header.
+	if len(lines) < 2 {
+		t.Fatal("View() has fewer than 2 lines")
+	}
+	header := strings.TrimSpace(lines[1])
+	if !strings.HasPrefix(header, "clauchy") {
+		t.Errorf("header line[1] does not start with 'clauchy': %q", header)
+	}
+}
+
+// TestViewHeader_Static_WhenIdle verifies that once syncing completes and the
+// 4-frame pulse is exhausted, the header "clauchy" renders statically (bold,
+// no per-letter color codes).
+func TestViewHeader_Static_WhenIdle(t *testing.T) {
+	deps := stubDeps(sampleUsage(), nil, sampleStats(), nil)
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
+	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	// Exhaust 4-frame pulse.
+	var cur tea.Model = m4
+	for i := 0; i < 4; i++ {
+		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
+	}
+	// Also deliver StatusMsg to clear loadingStatus.
+	cur, _ = cur.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: nil})
+	output := cur.(dashboard.Model).View()
+	lines := strings.Split(output, "\n")
+	if len(lines) < 2 {
+		t.Fatal("View() has fewer than 2 lines")
+	}
+	headerLine := lines[1]
+	n := countColorCodes(headerLine)
+	// Bold uses a different escape (not truecolor RGB), so n should be 0.
+	if n > 0 {
+		t.Errorf("header when idle has %d truecolor escapes, want 0 (plain bold); line: %q", n, headerLine)
+	}
+	stripped := stripANSI(headerLine)
+	if !strings.Contains(stripped, "clauchy") {
+		t.Errorf("header when idle missing 'clauchy': %q", stripped)
+	}
+}
+
+// simpleStats returns a Stats with no PricingDate so the footer right side is
+// only "updated HH:MM" — short enough that the status left side fits at 80 cols.
+func simpleStats() transcript.Stats {
+	return transcript.Stats{
+		Today:       transcript.DayTotals{Sessions: 1},
+		PricingDate: "", // intentionally blank — keeps footer right side short
+		Generated:   fixedNow,
+	}
+}
+
+// footerModel builds a dashboard model at testWidth×testHeight, delivers the
+// three data messages, exhausts the 4-frame sync pulse, and returns the final
+// model. Shared by the footer status tests.
+func footerModel(t *testing.T, s transcript.Stats, st status.Status, stErr error, colorful bool) dashboard.Model {
+	t.Helper()
+	deps := stubDepsWithStatus(sampleUsage(), nil, s, nil, st, stErr)
+	var m dashboard.Model
+	if colorful {
+		m = dashboard.NewColorful(deps, testPalette, fixedNowFn, "")
+	} else {
+		m = dashboard.New(deps, testPalette, fixedNowFn, "")
+	}
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
+	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: s, Err: nil})
+	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: st, Err: stErr})
+	var cur tea.Model = m5
+	for i := 0; i < 4; i++ {
+		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
+	}
+	return cur.(dashboard.Model)
+}
+
+// lastViewLine returns the footer (last) line of View(), raw (with ANSI).
+func lastViewLine(m dashboard.Model) string {
+	lines := strings.Split(m.View(), "\n")
+	return lines[len(lines)-1]
+}
+
+// TestFooterStatus_Operational verifies that an operational status renders the
+// short "● operational" form — short so it fits at 80 cols even beside the
+// long pricing text (sampleStats has a PricingDate).
+func TestFooterStatus_Operational(t *testing.T) {
+	st := status.Status{Indicator: "none", ClaudeCode: "operational", CachedAt: fixedNow}
+	m := footerModel(t, sampleStats(), st, nil, false)
+	lastLine := strings.TrimRight(stripANSI(lastViewLine(m)), " ")
+	if !strings.Contains(lastLine, "● operational") {
+		t.Errorf("footer should contain '● operational', got: %q", lastLine)
+	}
+	// The long pricing text must coexist with the status on the same row.
+	if !strings.Contains(lastLine, "est. costs") {
+		t.Errorf("footer right side missing beside operational status, got: %q", lastLine)
+	}
+}
+
+// TestFooterStatus_Incident_Major verifies a partial_outage (Worst == "major")
+// renders the ⚠ prefix with the humanized Claude Code component status.
+func TestFooterStatus_Incident_Major(t *testing.T) {
+	st := status.Status{Indicator: "minor", ClaudeCode: "partial_outage", CachedAt: fixedNow}
+	m := footerModel(t, simpleStats(), st, nil, false)
+	lastLine := strings.TrimRight(stripANSI(lastViewLine(m)), " ")
+	if !strings.Contains(lastLine, "⚠") {
+		t.Errorf("footer left should contain '⚠' for incident, got: %q", lastLine)
+	}
+	if !strings.Contains(lastLine, "Claude Code: partial outage") {
+		t.Errorf("footer left should show humanized 'Claude Code: partial outage', got: %q", lastLine)
+	}
+}
+
+// TestFooterStatus_NonClaudeCodeIncident_UsesDescription verifies that when the
+// incident is elsewhere (ClaudeCode == "operational" but the page indicator is
+// non-operational), the footer shows the page Description and does NOT render
+// the contradictory "Claude Code: operational".
+func TestFooterStatus_NonClaudeCodeIncident_UsesDescription(t *testing.T) {
+	st := status.Status{
+		Indicator:   "minor",
+		ClaudeCode:  "operational",
+		Description: "Elevated errors",
+		CachedAt:    fixedNow,
+	}
+	m := footerModel(t, simpleStats(), st, nil, false)
+	lastLine := strings.TrimRight(stripANSI(lastViewLine(m)), " ")
+	if strings.Contains(lastLine, "operational") {
+		t.Errorf("footer must not render 'Claude Code: operational' during a non-Claude-Code incident, got: %q", lastLine)
+	}
+	if !strings.Contains(lastLine, "Elevated errors") {
+		t.Errorf("footer should show the page description for a non-Claude-Code incident, got: %q", lastLine)
+	}
+}
+
+// TestFooterStatus_ZeroStatus_NoGhost verifies that a zero-value Status
+// delivered with a nil error (CachedAt.IsZero() — "no data") renders NO status
+// segment: neither the ● operational form nor a ghost ⚠ incident.
+func TestFooterStatus_ZeroStatus_NoGhost(t *testing.T) {
+	m := footerModel(t, simpleStats(), status.Status{}, nil, false)
+	lastLine := strings.TrimRight(stripANSI(lastViewLine(m)), " ")
+	if strings.Contains(lastLine, "●") || strings.Contains(lastLine, "⚠") {
+		t.Errorf("footer left must be empty for zero-value Status (no data), got: %q", lastLine)
+	}
+}
+
+// warningHex / errorHex / subtleHex are the truecolor SGR fragments for the
+// scheme incident colors — asserted raw to pin the color split.
+const (
+	warningHex = "38;2;249;226;175" // #f9e2af
+	errorHex   = "38;2;243;139;168" // #f38ba8
+	subtleHex  = "38;2;108;112;134" // #6c7086
+)
+
+// TestFooterStatus_MinorIncident_WarningColor pins minor incidents
+// (degraded_performance) to the Warning token #f9e2af in the raw escapes.
+func TestFooterStatus_MinorIncident_WarningColor(t *testing.T) {
+	st := status.Status{Indicator: "none", ClaudeCode: "degraded_performance", CachedAt: fixedNow}
+	m := footerModel(t, simpleStats(), st, nil, false)
+	lastLine := lastViewLine(m)
+	if !strings.Contains(lastLine, warningHex) {
+		t.Errorf("minor incident footer missing warning color %q, got: %q", warningHex, lastLine)
+	}
+}
+
+// TestFooterStatus_MajorIncident_ErrorColor pins major incidents
+// (partial_outage) to the scheme Error color #f38ba8 in the raw escapes.
+// Colorful scheme shares the same Error token — asserted for both.
+func TestFooterStatus_MajorIncident_ErrorColor(t *testing.T) {
+	st := status.Status{Indicator: "none", ClaudeCode: "partial_outage", CachedAt: fixedNow}
+	for _, colorful := range []bool{false, true} {
+		m := footerModel(t, simpleStats(), st, nil, colorful)
+		lastLine := lastViewLine(m)
+		if !strings.Contains(lastLine, errorHex) {
+			t.Errorf("colorful=%v: major incident footer missing error color %q, got: %q", colorful, errorHex, lastLine)
+		}
+	}
+}
+
+// TestFooterStatus_RightSideKeepsSubtleAfterLeft verifies the ANSI-bleed fix:
+// when the left status segment renders (its Render ends with an SGR reset),
+// the right segment must still carry the Subtle color explicitly instead of
+// relying on the outer footer wrapper style.
+func TestFooterStatus_RightSideKeepsSubtleAfterLeft(t *testing.T) {
+	st := status.Status{Indicator: "none", ClaudeCode: "degraded_performance", CachedAt: fixedNow}
+	m := footerModel(t, simpleStats(), st, nil, false)
+	lastLine := lastViewLine(m)
+
+	warnIdx := strings.Index(lastLine, warningHex)
+	if warnIdx < 0 {
+		t.Fatalf("footer missing the left warning segment: %q", lastLine)
+	}
+	rest := lastLine[warnIdx:]
+	if !strings.Contains(rest, subtleHex) {
+		t.Errorf("right footer segment after the left status lost the Subtle color %q: %q", subtleHex, lastLine)
+	}
+}
+
+// TestFooterStatus_Stale appends "(cached)" when Status.Stale is true.
+func TestFooterStatus_Stale(t *testing.T) {
+	st := status.Status{Indicator: "none", ClaudeCode: "operational", CachedAt: fixedNow, Stale: true}
+	m := footerModel(t, simpleStats(), st, nil, false)
+	lastLine := strings.TrimRight(stripANSI(lastViewLine(m)), " ")
+	if !strings.Contains(lastLine, "(cached)") {
+		t.Errorf("footer left should contain '(cached)' when stale, got: %q", lastLine)
+	}
+}
+
+// TestFooterStatus_FetchError_EmptyLeft verifies that when FetchStatus errors
+// and no status data is available, the left side of the footer is empty
+// (right side with est. costs still renders).
+func TestFooterStatus_FetchError_EmptyLeft(t *testing.T) {
+	deps := stubDepsWithStatus(sampleUsage(), nil, sampleStats(), nil, status.Status{}, fmt.Errorf("transient"))
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
+	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: fmt.Errorf("transient")})
+	var cur tea.Model = m5
+	for i := 0; i < 4; i++ {
+		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
+	}
+	output := stripANSI(cur.(dashboard.Model).View())
+	lines := strings.Split(output, "\n")
+	lastLine := strings.TrimRight(lines[len(lines)-1], " ")
+	// Left side must be empty — no "●", "⚠".
+	if strings.Contains(lastLine, "●") || strings.Contains(lastLine, "⚠") {
+		t.Errorf("footer left should be empty on fetch error, got: %q", lastLine)
+	}
+	// Right side (est. costs) must still appear.
+	if !strings.Contains(output, "est. costs") {
+		t.Errorf("footer right side 'est. costs' missing on status fetch error; output:\n%s", output)
+	}
+}
+
+// execBatch executes a returned tea.Cmd fully asynchronously (unwrapping one
+// tea.BatchMsg level). The top-level cmd also runs in a goroutine: tea.Batch
+// with a SINGLE entry returns that command unwrapped, and a bare tickCmd would
+// otherwise sleep its whole interval on the test goroutine. Tick goroutines
+// leak deliberately; the test binary does not wait for them. Callers observe
+// effects via waitForCount polling.
+func execBatch(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	go func() {
+		msg := cmd()
+		batch, ok := msg.(tea.BatchMsg)
+		if !ok {
+			return
+		}
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			go c() //nolint:errcheck
+		}
+	}()
+}
+
+// waitForCount polls counter (atomic) until it reaches want or the deadline hits.
+func waitForCount(counter *atomic.Int32, want int32, deadline time.Duration) bool {
+	stop := time.Now().Add(deadline)
+	for time.Now().Before(stop) {
+		if counter.Load() >= want {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return counter.Load() >= want
+}
+
+// TestStatusMsg_ClearsLoadingStatus verifies the status in-flight guard end to
+// end: a TickMsg BEFORE StatusMsg (loadingStatus still true from New) must not
+// issue a status fetch; a TickMsg AFTER StatusMsg (flag cleared) must issue
+// exactly one. Fetch counts are observed by executing the returned commands.
+func TestStatusMsg_ClearsLoadingStatus(t *testing.T) {
+	var fetchCount atomic.Int32
+	st := status.Status{Indicator: "none", ClaudeCode: "operational", CachedAt: fixedNow}
+	deps := dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) { return limits.Usage{}, nil },
+		FetchStats:  func() (transcript.Stats, error) { return transcript.Stats{}, nil },
+		FetchStatus: func() (status.Status, error) {
+			fetchCount.Add(1)
+			return st, nil
+		},
+	}
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+
+	// Tick BEFORE StatusMsg: guard ON (loadingStatus true from New) — the
+	// returned batch must not contain a status fetch.
+	m2, cmd := m.Update(dashboard.TickMsg(fixedNow))
+	execBatch(cmd)
+	if waitForCount(&fetchCount, 1, 100*time.Millisecond) {
+		t.Fatalf("TickMsg while loadingStatus issued a status fetch (count=%d), want 0 (guard ON)", fetchCount.Load())
+	}
+
+	// Deliver StatusMsg: clears loadingStatus and sets hasStatus.
+	m3, _ := m2.(dashboard.Model).Update(dashboard.StatusMsg{Status: st, Err: nil})
+	if !m3.(dashboard.Model).HasStatus() {
+		t.Error("HasStatus() should be true after StatusMsg with no error")
+	}
+
+	// Tick AFTER StatusMsg: guard OFF — exactly one status fetch is issued.
+	_, cmd2 := m3.(dashboard.Model).Update(dashboard.TickMsg(fixedNow))
+	execBatch(cmd2)
+	if !waitForCount(&fetchCount, 1, time.Second) {
+		t.Fatalf("TickMsg after StatusMsg issued no status fetch (count=%d), want 1", fetchCount.Load())
+	}
+	if got := fetchCount.Load(); got != 1 {
+		t.Errorf("status fetch count after post-StatusMsg tick = %d, want 1", got)
+	}
+}
+
+// ─── Fix: nil FetchStatus dep (legacy wiring without a status seam) ──────────
+
+// TestNilFetchStatus_IdleAfterData verifies that a Deps without FetchStatus
+// does not leave the model syncing forever: loadingStatus must start false, so
+// once limits+stats arrive and the pulse is exhausted the header goes static.
+func TestNilFetchStatus_IdleAfterData(t *testing.T) {
+	deps := dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) { return sampleUsage(), nil },
+		FetchStats:  func() (transcript.Stats, error) { return sampleStats(), nil },
+		// FetchStatus deliberately nil.
+	}
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
+	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	var cur tea.Model = m4
+	for i := 0; i < 4; i++ {
+		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
+	}
+	headerLine := strings.Split(cur.(dashboard.Model).View(), "\n")[1]
+	if n := countColorCodes(headerLine); n > 0 {
+		t.Errorf("header still animated (%d color escapes) with nil FetchStatus after data arrived — loadingStatus never cleared", n)
+	}
+}
+
+// TestNilFetchStatus_TickDoesNotResetPulse verifies that a TickMsg does not
+// count a status fetch it will never issue: with nil FetchStatus and the
+// limits/stats guards ON, no fetch is issued, so the sync pulse stays at 0.
+func TestNilFetchStatus_TickDoesNotResetPulse(t *testing.T) {
+	deps := dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) { return limits.Usage{}, nil },
+		FetchStats:  func() (transcript.Stats, error) { return transcript.Stats{}, nil },
+		// FetchStatus deliberately nil.
+	}
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	// Exhaust the initial pulse while the limits/stats guards stay ON.
+	var cur tea.Model = m
+	for i := 0; i < 4; i++ {
+		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
+	}
+	if got := cur.(dashboard.Model).SyncPulseFrames(); got != 0 {
+		t.Fatalf("pulse not exhausted before tick: SyncPulseFrames() = %d, want 0", got)
+	}
+	// Tick: limits/stats guards ON, status dep nil → nothing issued → pulse
+	// must NOT be reset to 4.
+	cur, _ = cur.(dashboard.Model).Update(dashboard.TickMsg(fixedNow))
+	if got := cur.(dashboard.Model).SyncPulseFrames(); got != 0 {
+		t.Errorf("TickMsg reset the pulse (SyncPulseFrames() = %d) for a status fetch it cannot issue, want 0", got)
 	}
 }

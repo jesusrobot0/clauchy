@@ -24,6 +24,7 @@ import (
 	"github.com/jesusrobot0/clauchy/internal/limits"
 	"github.com/jesusrobot0/clauchy/internal/oauth"
 	"github.com/jesusrobot0/clauchy/internal/severity"
+	"github.com/jesusrobot0/clauchy/internal/status"
 )
 
 // Output is the JSON payload for a Waybar custom module with return-type: json.
@@ -40,10 +41,14 @@ type Output struct {
 // The legacy glyph (󰚩) has been replaced by this mechanism.
 const moduleText = " "
 
-// Render produces a Waybar Output from a limits.Cached result.
-// It never returns an empty Output — every error state maps to a valid icon +
-// message + severity class so Waybar never shows a blank or crashes.
-func Render(u limits.Usage, err error, now time.Time) Output {
+// Render produces a Waybar Output from a limits.Cached result and an optional
+// status.Status. It never returns an empty Output — every error state maps to a
+// valid icon + message + severity class so Waybar never shows a blank or crashes.
+//
+// st is the Claude status page result from status.Cached. On fetch error, callers
+// MUST pass a zero status.Status (zero CachedAt) so Render omits the status line.
+// A status failure MUST NEVER break the waybar output.
+func Render(u limits.Usage, err error, now time.Time, st status.Status) Output {
 	// Error states: no credentials, persistent refresh rejection, or other errors.
 	if err != nil {
 		if errors.Is(err, oauth.ErrNoCredentials) ||
@@ -73,7 +78,7 @@ func Render(u limits.Usage, err error, now time.Time) Output {
 	}
 
 	// Normal or stale: build the Pango tooltip and classify from 5h utilization.
-	tooltip := buildTooltip(u, now)
+	tooltip := buildTooltip(u, now, st)
 	cls := severityClass(severity.Classify(u.FiveHour.Utilization))
 
 	return Output{
@@ -83,8 +88,11 @@ func Render(u limits.Usage, err error, now time.Time) Output {
 	}
 }
 
-// buildTooltip assembles the multi-line Pango tooltip from a usage value.
-func buildTooltip(u limits.Usage, now time.Time) string {
+// buildTooltip assembles the multi-line Pango tooltip from a usage value and
+// an optional Claude status.Status. The status line is appended only when there
+// is an incident (status.Worst(st) != "operational") AND st.CachedAt is non-zero
+// (i.e. we have real data, not a zero-value error fallback).
+func buildTooltip(u limits.Usage, now time.Time, st status.Status) string {
 	var sb strings.Builder
 
 	// Line 1: Session (5h) — format as Hh Mm (the window is at most 5h)
@@ -121,6 +129,15 @@ func buildTooltip(u limits.Usage, now time.Time) string {
 	if u.Stale {
 		ageMin := int(math.Round(now.Sub(u.CachedAt).Minutes()))
 		sb.WriteString(fmt.Sprintf("\n<i>(cached %d min ago)</i>", ageMin))
+	}
+
+	// Optional Claude status line — only when there is an incident and we have
+	// real status data (non-zero CachedAt means Cached wrote a payload).
+	// Zero status.Status (CachedAt.IsZero()) means the caller had a fetch error
+	// and passed a zero value; skip the line in that case.
+	// The label derivation is shared with the dashboard footer (status.HumanLabel).
+	if !st.CachedAt.IsZero() && status.Worst(st) != "operational" {
+		sb.WriteString(fmt.Sprintf("\n<b>Claude status</b>: %s", html.EscapeString(status.HumanLabel(st))))
 	}
 
 	return sb.String()
