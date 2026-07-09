@@ -1,0 +1,14 @@
+{
+    // "custom/clauchy" is in the array but the module object is absent
+    "layer": "top",
+    "position": "top",
+    "modules-right": [
+        "cpu",
+        "memory",
+        "custom/clauchy"
+    ],
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 5
+    }
+}

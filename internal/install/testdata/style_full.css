@@ -1,0 +1,38 @@
+* {
+    font-family: JetBrainsMono Nerd Font;
+    font-size: 13px;
+    min-height: 0;
+}
+
+window#waybar {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    border-bottom: 2px solid #45475a;
+}
+
+.modules-right {
+    margin-right: 5px;
+}
+
+#cpu {
+    color: #89b4fa;
+}
+
+/* clauchy start */
+#custom-clauchy {
+    background-image: url("icon-low.svg");
+    background-size: 14px 14px;
+    background-repeat: no-repeat;
+    background-position: center;
+    min-width: 18px;
+}
+#custom-clauchy.mid {
+    background-image: url("icon-mid.svg");
+}
+#custom-clauchy.high {
+    background-image: url("icon-high.svg");
+}
+#custom-clauchy.critical {
+    background-image: url("icon-critical.svg");
+}
+/* clauchy end */

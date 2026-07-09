@@ -1,0 +1,7 @@
+{
+    // Truncated mid-object — simulates a partial write or disk-full scenario
+    "layer": "top",
+    "modules-right": ["custom/network"],
+    "custom/network": {
+        "exec": "nm-applet",
+        "return-type": "json"

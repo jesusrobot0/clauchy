@@ -1,0 +1,38 @@
+{
+    // Waybar configuration for Omarchy desktop
+    "layer": "top",
+    "position": "top",
+    "height": 30,
+    /* spacing between modules */
+    "spacing": 4,
+    "modules-left": [
+        "hyprland/workspaces",
+        "hyprland/window"
+    ],
+    "modules-center": [
+        "clock"
+    ],
+    "modules-right": [
+        "cpu",
+        "memory",
+        "battery",
+        "network",
+        "tray"
+    ],
+    "hyprland/workspaces": {
+        "format": "{id}",
+        "on-click": "activate"
+    },
+    "clock": {
+        "format": "%H:%M:%S",
+        "tooltip-format": "<big>{:%Y %B}</big>"
+    },
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 5
+    },
+    "battery": {
+        "format": "{capacity}% {icon}",
+        "format-icons": ["", "", "", "", ""]
+    }
+}

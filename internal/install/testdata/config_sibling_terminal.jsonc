@@ -1,0 +1,13 @@
+{
+    // Another module has an on-click with a known terminal — reuse it
+    "layer": "top",
+    "position": "top",
+    "modules-right": [
+        "cpu"
+    ],
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 5,
+        "on-click": "uwsm-app -- alacritty --class=sysmon -e btop"
+    }
+}

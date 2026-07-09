@@ -1,0 +1,17 @@
+{
+    // Config with { } inside string values — tokenizer must NOT count them as depth
+    "layer": "top",
+    "position": "top",
+    "modules-right": [
+        "cpu",
+        "clock"
+    ],
+    "cpu": {
+        "format": "CPU: {usage}% | load: {load}",
+        "tooltip": "{temperatureC}°C {temperatureF}°F"
+    },
+    "clock": {
+        "format": "{:%H:%M:%S}",
+        "tooltip-format": "<big>{:%Y %B}</big>\n<tt>{calendar}</tt>"
+    }
+}

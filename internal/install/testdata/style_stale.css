@@ -1,0 +1,24 @@
+* {
+    font-family: JetBrainsMono Nerd Font;
+    font-size: 13px;
+    min-height: 0;
+}
+
+#cpu {
+    color: #89b4fa;
+}
+
+/* clauchy start */
+#custom-clauchy.low {
+    color: #a6e3a1;
+}
+#custom-clauchy.mid {
+    color: #f9e2af;
+}
+#custom-clauchy.high {
+    color: #fab387;
+}
+#custom-clauchy.critical {
+    color: #f38ba8;
+}
+/* clauchy end */

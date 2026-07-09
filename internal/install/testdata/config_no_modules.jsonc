@@ -1,0 +1,10 @@
+{
+    // Config with no modules-* arrays at all — should return ErrNoModulesArray
+    "layer": "top",
+    "position": "top",
+    "height": 30,
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 5
+    }
+}

@@ -1,0 +1,19 @@
+{
+    // Module object has wrong exec — must be repaired
+    "layer": "top",
+    "position": "top",
+    "modules-right": [
+        "cpu",
+        "custom/clauchy"
+    ],
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 5
+    },
+    "custom/clauchy": {
+        "exec": "old-clauchy-binary",
+        "return-type": "json",
+        "interval": 60,
+        "on-click": "uwsm-app -- ghostty --class=clauchy.panel -e old-clauchy"
+    }
+}

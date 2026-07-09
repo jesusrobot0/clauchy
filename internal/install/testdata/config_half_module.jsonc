@@ -1,0 +1,19 @@
+{
+    // Module object exists but "custom/clauchy" is NOT in any modules-* array
+    "layer": "top",
+    "position": "top",
+    "modules-right": [
+        "cpu",
+        "memory"
+    ],
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 5
+    },
+    "custom/clauchy": {
+        "exec": "clauchy waybar",
+        "return-type": "json",
+        "interval": 60,
+        "on-click": "uwsm-app -- ghostty --class=clauchy.panel -e clauchy"
+    }
+}

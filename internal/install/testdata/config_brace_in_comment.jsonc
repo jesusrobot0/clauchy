@@ -1,0 +1,16 @@
+{
+    // Old config: "modules-right": ["cpu", {"custom": "old"}] -- braces must not count
+    "layer": "top",
+    "position": "top",
+    /* Backup of old layout: {
+       "modules-right": ["cpu", "old-module"]
+    } */
+    "modules-right": [
+        "cpu",
+        "memory"
+    ],
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 5
+    }
+}

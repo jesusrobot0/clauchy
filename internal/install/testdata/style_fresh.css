@@ -1,0 +1,19 @@
+* {
+    font-family: JetBrainsMono Nerd Font;
+    font-size: 13px;
+    min-height: 0;
+}
+
+window#waybar {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    border-bottom: 2px solid #45475a;
+}
+
+.modules-right {
+    margin-right: 5px;
+}
+
+#cpu {
+    color: #89b4fa;
+}

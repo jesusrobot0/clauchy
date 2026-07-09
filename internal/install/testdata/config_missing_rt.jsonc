@@ -1,0 +1,17 @@
+{
+    // Module object has exec but missing return-type and interval — must be repaired
+    "layer": "top",
+    "position": "top",
+    "modules-right": [
+        "cpu",
+        "custom/clauchy"
+    ],
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 5
+    },
+    "custom/clauchy": {
+        "exec": "clauchy waybar",
+        "on-click": "uwsm-app -- ghostty --class=clauchy.panel -e clauchy"
+    }
+}

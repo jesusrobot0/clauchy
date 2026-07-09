@@ -1,0 +1,20 @@
+{
+    // Fully installed but on-click uses the old format without font-size.
+    // Must be treated as stale → repaired.
+    "layer": "top",
+    "position": "top",
+    "modules-right": [
+        "cpu",
+        "custom/clauchy"
+    ],
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 5
+    },
+    "custom/clauchy": {
+        "exec": "clauchy waybar",
+        "return-type": "json",
+        "interval": 60,
+        "on-click": "uwsm-app -- ghostty --class=clauchy.panel -e clauchy"
+    }
+}

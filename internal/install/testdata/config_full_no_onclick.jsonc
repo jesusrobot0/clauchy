@@ -1,0 +1,18 @@
+{
+    // Waybar configuration for Omarchy desktop (terminal-less host)
+    "layer": "top",
+    "position": "top",
+    "modules-right": [
+        "cpu",
+        "custom/clauchy"
+    ],
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 5
+    },
+    "custom/clauchy": {
+        "exec": "clauchy waybar",
+        "return-type": "json",
+        "interval": 60
+    }
+}
