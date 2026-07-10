@@ -435,12 +435,13 @@ func (m Model) View() string {
 		}
 	}
 
-	// ── Top margin + Header row ───────────────────────────────────────────────
-	addRow("") // blank top margin above header
+	// ── Top margin + Header row + header gap ─────────────────────────────────
+	// Both blanks are height-flexible: when the window is too short, the shed
+	// pass below drops the top margin first, then this header gap (the inner
+	// breathing room outranks the outer margin).
+	addRow("") // blank top margin above header (shed priority 1)
 	addRow(m.viewHeader(contentWidth))
-	// Note: the blank spacer that used to sit between header and bars was
-	// removed (Change 21 shed) to make room for the two blank breathing rows
-	// added around the horizontal rule below.
+	addRow("") // blank gap below the brand row (shed priority 2, Change 22)
 
 	// ── Inline limit bars (1–2 rows) ─────────────────────────────────────────
 	for _, lr := range m.viewLimitBarsInline(contentWidth) {
@@ -482,6 +483,21 @@ func (m Model) View() string {
 	footer := footerStyle.Render(m.viewFooterContent(contentWidth))
 
 	if m.height > 0 {
+		// Shed pass: when the content would overflow the window, drop flexible
+		// whitespace in priority order — the top margin (index 0) first, then
+		// the header gap (which sits at index 1 after the first removal).
+		// addRow pads blank rows to contentWidth, so "blank" means
+		// whitespace-only, not the empty string.
+		isBlank := func(s string) bool { return strings.TrimSpace(s) == "" }
+		overflow := (len(lines) + 2) - m.height
+		if overflow > 0 && len(lines) > 0 && isBlank(lines[0]) {
+			lines = lines[1:]
+			overflow--
+		}
+		if overflow > 0 && len(lines) > 1 && isBlank(lines[1]) {
+			lines = append(lines[:1], lines[2:]...)
+		}
+
 		// Total lines so far + 1 blank separator + footer = m.height target.
 		blankCount := m.height - len(lines) - 2
 		if blankCount < 0 {

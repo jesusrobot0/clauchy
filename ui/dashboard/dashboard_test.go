@@ -544,7 +544,7 @@ func TestView_FooterPinnedToBottom(t *testing.T) {
 
 	// The header "clauchy" brand must appear at line index 1 (after the blank top margin).
 	if len(lines) >= 2 {
-		headerLine := stripANSI(lines[1])
+		headerLine := stripANSI(findHeaderLine(t, output))
 		if !strings.Contains(headerLine, "clauchy") {
 			t.Errorf("line[1] (header) does not contain 'clauchy', got: %q", headerLine)
 		}
@@ -1042,7 +1042,7 @@ func TestView_Loading_ExactHeight(t *testing.T) {
 
 	// The header "clauchy" brand must appear at line index 1.
 	if len(lines) >= 2 {
-		headerLine := stripANSI(lines[1])
+		headerLine := stripANSI(findHeaderLine(t, output))
 		if !strings.Contains(headerLine, "clauchy") {
 			t.Errorf("line[1] (header) does not contain 'clauchy', got: %q", headerLine)
 		}
@@ -1072,7 +1072,7 @@ func TestHeaderAnimation_WhileSyncing(t *testing.T) {
 	if len(lines) < 2 {
 		t.Fatal("View() has fewer than 2 lines")
 	}
-	headerLine := lines[1]
+	headerLine := findHeaderLine(t, output)
 	// The animated header has one color code per letter (7 for "clauchy").
 	n := countColorCodes(headerLine)
 	if n < 7 {
@@ -1102,7 +1102,7 @@ func TestHeaderAnimation_StaticWhenIdle(t *testing.T) {
 	if len(lines) < 2 {
 		t.Fatal("View() has fewer than 2 lines")
 	}
-	headerLine := lines[1]
+	headerLine := findHeaderLine(t, output)
 
 	// When idle the header "clauchy" renders as plain bold (no truecolor RGB escapes).
 	n := countColorCodes(headerLine)
@@ -1135,11 +1135,7 @@ func TestHeaderAnimation_MinimumPulse(t *testing.T) {
 		cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
 	}
 	outputMid := cur.(dashboard.Model).View()
-	linesMid := strings.Split(outputMid, "\n")
-	if len(linesMid) < 2 {
-		t.Fatal("View() has fewer than 2 lines")
-	}
-	headerMid := linesMid[1]
+	headerMid := findHeaderLine(t, outputMid)
 	if countColorCodes(headerMid) < 7 {
 		t.Errorf("header after 3 AnimTicks (mid-pulse) has <7 color codes — animation must still be active; got: %q", headerMid)
 	}
@@ -1147,11 +1143,7 @@ func TestHeaderAnimation_MinimumPulse(t *testing.T) {
 	// After 1 more AnimTickMsg (total 4) the countdown is exhausted → static header.
 	cur, _ = cur.(dashboard.Model).Update(dashboard.AnimTickMsg{})
 	outputDone := cur.(dashboard.Model).View()
-	linesDone := strings.Split(outputDone, "\n")
-	if len(linesDone) < 2 {
-		t.Fatal("View() has fewer than 2 lines")
-	}
-	headerDone := linesDone[1]
+	headerDone := findHeaderLine(t, outputDone)
 	if countColorCodes(headerDone) > 0 {
 		t.Errorf("header after 4 AnimTicks (pulse done) still animated (%d color codes); want 0 static", countColorCodes(headerDone))
 	}
@@ -1401,7 +1393,7 @@ func TestViewHeader_NoPlanLabel_BrandPresent(t *testing.T) {
 	if len(lines) < 2 {
 		t.Fatal("View() has fewer than 2 lines")
 	}
-	header := strings.TrimSpace(lines[1])
+	header := strings.TrimSpace(stripANSI(findHeaderLine(t, output)))
 	if !strings.HasPrefix(header, "clauchy") {
 		t.Errorf("header line[1] does not start with 'clauchy': %q", header)
 	}
@@ -1428,7 +1420,7 @@ func TestViewHeader_Static_WhenIdle(t *testing.T) {
 	if len(lines) < 2 {
 		t.Fatal("View() has fewer than 2 lines")
 	}
-	headerLine := lines[1]
+	headerLine := findHeaderLine(t, output)
 	n := countColorCodes(headerLine)
 	// Bold uses a different escape (not truecolor RGB), so n should be 0.
 	if n > 0 {
@@ -1898,4 +1890,18 @@ func TestWavePulseExactlyTwoSweeps(t *testing.T) {
 		t.Errorf("SyncPulseMinFrames = %d, want 2 * sweepFrames(%q) = 2 * %d = %d",
 			dashboard.SyncPulseMinFrames, brand, sweepFrames, want)
 	}
+}
+
+// findHeaderLine returns the first rendered line containing the brand word
+// "clauchy" (ANSI included). The header's absolute row shifts when the
+// height-shed pass drops the top margin, so tests must locate it, not index it.
+func findHeaderLine(t *testing.T, output string) string {
+	t.Helper()
+	for _, l := range strings.Split(output, "\n") {
+		if strings.Contains(stripANSI(l), "clauchy") {
+			return l
+		}
+	}
+	t.Fatalf("no line containing 'clauchy' found in View output:\n%s", stripANSI(output))
+	return ""
 }
