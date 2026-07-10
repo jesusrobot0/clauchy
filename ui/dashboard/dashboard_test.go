@@ -1759,3 +1759,143 @@ func TestNilFetchStatus_TickDoesNotResetPulse(t *testing.T) {
 		t.Errorf("TickMsg reset the pulse (SyncPulseFrames() = %d) for a status fetch it cannot issue, want 0", got)
 	}
 }
+
+// ─── Change 21: panel breathing + wave = 2 sweeps ─────────────────────────────
+
+// TestDivider_LeftGapSymmetric verifies that the left column's right-aligned
+// values have exactly 1 space before the │ divider — matching the 1-space gap
+// the right column already has after │. Specifically, the "Input ... 2K" row
+// must end with " 2K │ ..." (space before │), not "2K│..." (flush).
+func TestDivider_LeftGapSymmetric(t *testing.T) {
+	deps := stubDeps(sampleUsage(), nil, sampleStats(), nil)
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
+	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	output := stripANSI(m4.View())
+	lines := strings.Split(output, "\n")
+
+	// Identify specifically the "Input" row: contains "Input" in the left column
+	// and "│" in the divider position. The rune immediately before │ must be a space.
+	found := false
+	for _, line := range lines {
+		if !strings.Contains(line, "Input") || !strings.Contains(line, "│") {
+			continue
+		}
+		if strings.Contains(line, "─") {
+			continue // skip the ─┬─ divider line
+		}
+		// Find the │ rune position (rune-safe, since │ = U+2502 is multi-byte).
+		runes := []rune(line)
+		barIdx := -1
+		for i, r := range runes {
+			if r == '│' {
+				barIdx = i
+				break
+			}
+		}
+		if barIdx <= 0 {
+			continue
+		}
+		// The rune immediately before │ must be a space.
+		if runes[barIdx-1] != ' ' {
+			t.Errorf("no space before │ on 'Input' row — left column value %q ends flush against │; full line: %q",
+				string(runes[barIdx-1]), line)
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Error("could not find the 'Input' value row with │ to check gap")
+	}
+}
+
+// TestBlankRowBetweenBarsAndRule verifies that there is exactly one blank line
+// between the limit-bars row and the horizontal rule (───┬───).
+func TestBlankRowBetweenBarsAndRule(t *testing.T) {
+	deps := stubDeps(sampleUsage(), nil, sampleStats(), nil)
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
+	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	lines := strings.Split(stripANSI(m4.View()), "\n")
+
+	// Find the index of the rule line (contains "┬").
+	ruleIdx := -1
+	for i, line := range lines {
+		if strings.Contains(line, "┬") {
+			ruleIdx = i
+			break
+		}
+	}
+	if ruleIdx < 1 {
+		t.Fatal("could not find the ─┬─ horizontal rule line")
+	}
+
+	// The line immediately before the rule must be blank (all spaces or empty).
+	lineBeforeRule := strings.TrimRight(lines[ruleIdx-1], " ")
+	if lineBeforeRule != "" {
+		t.Errorf("line before ─┬─ rule is not blank, got: %q", lines[ruleIdx-1])
+	}
+}
+
+// TestBlankRowBetweenRuleAndTitles verifies that there is exactly one blank
+// line (with the │ divider present) between the horizontal rule (───┬───) and
+// the section titles row ("Today ↘ │ Models (7d)").
+func TestBlankRowBetweenRuleAndTitles(t *testing.T) {
+	deps := stubDeps(sampleUsage(), nil, sampleStats(), nil)
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+	m3, _ := m2.(dashboard.Model).Update(dashboard.LimitsMsg{Usage: sampleUsage(), Err: nil})
+	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	lines := strings.Split(stripANSI(m4.View()), "\n")
+
+	// Find the rule line.
+	ruleIdx := -1
+	for i, line := range lines {
+		if strings.Contains(line, "┬") {
+			ruleIdx = i
+			break
+		}
+	}
+	if ruleIdx < 0 || ruleIdx+2 >= len(lines) {
+		t.Fatal("could not find the ─┬─ rule line or there are not enough lines after it")
+	}
+
+	// The line immediately after the rule must be a blank row with │.
+	lineAfterRule := lines[ruleIdx+1]
+	strippedAfterRule := strings.TrimRight(lineAfterRule, " ")
+	// It must contain │ (to keep the vertical line continuous) and otherwise be all spaces.
+	if !strings.Contains(lineAfterRule, "│") {
+		t.Errorf("line after rule does not contain │ (vertical continuity required), got: %q", lineAfterRule)
+	}
+	// After removing the │ and surrounding spaces, the rest must be all spaces.
+	withoutBar := strings.Replace(strippedAfterRule, "│", "", 1)
+	if strings.TrimRight(withoutBar, " ") != "" {
+		t.Errorf("line after rule contains non-space content besides │: %q", lineAfterRule)
+	}
+
+	// The line two positions after the rule must contain the section titles.
+	titlesLine := stripANSI(lines[ruleIdx+2])
+	if !strings.Contains(titlesLine, "Today") || !strings.Contains(titlesLine, "Models") {
+		t.Errorf("expected section titles at line[%d], got: %q", ruleIdx+2, titlesLine)
+	}
+}
+
+// TestWavePulseExactlyTwoSweeps verifies that SyncPulseMinFrames equals exactly
+// two sweeps of the brand word "clauchy" at the current waveLetterStep and
+// waveFrameStep constants. One sweep = (len("clauchy")-1)*waveLetterStep/waveFrameStep.
+// With waveLetterStep=30 and waveFrameStep=22.5: sweepFrames = 6*30/22.5 = 8.
+// SyncPulseMinFrames must equal 2*8 = 16 so the constant cannot drift from the rule.
+func TestWavePulseExactlyTwoSweeps(t *testing.T) {
+	const brand = "clauchy"
+	const waveLetterStep = 30.0
+	const waveFrameStep = 22.5
+	// sweepFrames is the number of frames for one complete crest crossing.
+	sweepFrames := int((float64(len(brand)-1) * waveLetterStep) / waveFrameStep)
+	want := 2 * sweepFrames
+	if dashboard.SyncPulseMinFrames != want {
+		t.Errorf("SyncPulseMinFrames = %d, want 2 * sweepFrames(%q) = 2 * %d = %d",
+			dashboard.SyncPulseMinFrames, brand, sweepFrames, want)
+	}
+}

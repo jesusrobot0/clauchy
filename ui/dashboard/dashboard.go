@@ -72,12 +72,25 @@ type TickMsg time.Time
 // Exported so tests can send it directly to Model.Update.
 type AnimTickMsg struct{}
 
+// waveLetterStep is the hue or phase offset (degrees) between adjacent letters
+// in the RainbowText / GrayscaleText wave. Controls the spatial frequency of
+// the gradient — 30° per letter spreads one full cycle across 12 letters.
+const waveLetterStep = 30.0
+
+// waveFrameStep is the number of degrees the wave crest advances per 150ms
+// animation frame. At 22.5°/frame the crest crosses the 7-letter brand word
+// "clauchy" in (6×30)/22.5 = 8 frames — one complete sweep.
+const waveFrameStep = 22.5
+
 // SyncPulseMinFrames is the number of animation frames the header wave plays
-// when the pulse is triggered (13 frames × 150 ms ≈ 2 s). The pulse fires on
-// app open and whenever a fetch lands data with a NEW CachedAt timestamp for
-// limits or status; cache-hit ticks and local stats recomputes do not animate.
+// when the pulse is triggered (16 frames × 150 ms ≈ 2.4 s = exactly 2 sweeps
+// of the brand word "clauchy": sweepFrames = (len-1)×waveLetterStep/waveFrameStep
+// = 6×30/22.5 = 8; SyncPulseMinFrames = 2×8 = 16).
+// The pulse fires on app open and whenever a fetch lands data with a NEW
+// CachedAt timestamp for limits or status; cache-hit ticks and local stats
+// recomputes do not animate.
 // Exported so tests exhaust the pulse without hardcoding the value.
-const SyncPulseMinFrames = 13
+const SyncPulseMinFrames = 16
 
 const tickInterval = 5 * time.Second
 const animTickInterval = 150 * time.Millisecond
@@ -425,15 +438,34 @@ func (m Model) View() string {
 	// ── Top margin + Header row ───────────────────────────────────────────────
 	addRow("") // blank top margin above header
 	addRow(m.viewHeader(contentWidth))
-	addRow("") // blank spacer
+	// Note: the blank spacer that used to sit between header and bars was
+	// removed (Change 21 shed) to make room for the two blank breathing rows
+	// added around the horizontal rule below.
 
 	// ── Inline limit bars (1–2 rows) ─────────────────────────────────────────
 	for _, lr := range m.viewLimitBarsInline(contentWidth) {
 		addRow(lr)
 	}
 
+	// ── Blank breathing row between bars and the horizontal rule ─────────────
+	addRow("") // plain blank row (Change 21)
+
 	// ── Column divider ────────────────────────────────────────────────────────
 	addRow(m.viewColDivider(contentWidth))
+
+	// ── Blank breathing row between the rule and the section titles ──────────
+	// The blank row must carry the │ divider at the column position so the
+	// vertical line stays visually continuous through this gap row.
+	// leftWidth = (contentWidth-2)/2 is the padded column width; │ sits right
+	// after it — the same position as the ┬ in the horizontal rule above.
+	{
+		const sepWidth = 2
+		leftColWidth := (contentWidth - sepWidth) / 2
+		rightColWidth := contentWidth - sepWidth - leftColWidth
+		barStyled := lipgloss.NewStyle().Foreground(lipgloss.Color(m.scheme.Border)).Render("│")
+		emptyDivRow := strings.Repeat(" ", leftColWidth) + barStyled + strings.Repeat(" ", rightColWidth+1)
+		addRow(emptyDivRow)
+	}
 
 	// ── Two-column body ───────────────────────────────────────────────────────
 	addRow(m.viewTwoColumns(contentWidth))
@@ -626,8 +658,9 @@ func (m Model) viewLimitBarsInline(contentWidth int) []string {
 }
 
 // viewColDivider renders the "──…──┬─…──" line separating the two columns.
-// The ┬ sits at the same position as the "│" in viewTwoColumns, and one dash
-// follows it (matching the space after │ in the body rows).
+// The ┬ sits at leftWidth = (contentWidth-2)/2 — the same position as "│" in
+// viewTwoColumns (body lines are padded to leftWidth, so │ starts at column
+// leftWidth). One dash follows ┬ to echo the " " in the "│ " body separator.
 func (m Model) viewColDivider(contentWidth int) string {
 	const sepWidth = 2
 	leftW := (contentWidth - sepWidth) / 2
@@ -638,15 +671,21 @@ func (m Model) viewColDivider(contentWidth int) string {
 }
 
 // viewTwoColumns renders Today (left) and Models+Week (right) side-by-side.
-// The inner separator is "│ " (bar + space) so the right column has a visual
-// gap matching the left column's leading-space convention.
+// The inner separator is "│ " (bar + space): the right column has a 1-space
+// gap AFTER │. To give the left column a matching 1-space gap BEFORE │, the
+// left content is built against a 1-char-narrower usable width (leftUsable)
+// but padded to the full leftWidth — the trailing space is the breathing gap.
+// Both sides of the divider now breathe equally.
 func (m Model) viewTwoColumns(contentWidth int) string {
-	// separator is "│ " (2 chars): 1 for bar, 1 for breathing room
+	// separator is "│ " (2 chars): 1 for │, 1 for breathing room on the right.
 	const sepWidth = 2
 	leftWidth := (contentWidth - sepWidth) / 2
+	// leftUsable is 1 char narrower than leftWidth so right-aligned values land
+	// 1 space before │. padLines pads the content to leftWidth, creating the gap.
+	leftUsable := leftWidth - 1
 	rightWidth := contentWidth - sepWidth - leftWidth
 
-	leftBlock := padLines(m.buildTodayContent(leftWidth), leftWidth)
+	leftBlock := padLines(m.buildTodayContent(leftUsable), leftWidth)
 	rightBlock := padLines(m.buildRightContent(rightWidth), rightWidth)
 
 	barStyled := lipgloss.NewStyle().Foreground(lipgloss.Color(m.scheme.Border)).Render("│")
@@ -1211,11 +1250,10 @@ func hslToHex(h, s, l float64) string {
 // RainbowText renders a string with per-letter HSL hue rotation, offset by the
 // animation frame. The formula is deterministic for a given (s, frame) pair:
 //
-//	hue = (i*30 - frame*12) mod 360
+//	hue = (i*waveLetterStep - frame*waveFrameStep) mod 360
 //
 // The frame offset is SUBTRACTED so the color wave travels left-to-right
-// (clockwise feel) as frames advance. Go's % keeps the sign of the dividend,
-// so the result is normalized into [0, 360).
+// (clockwise feel) as frames advance. The result is normalized into [0, 360).
 // Saturation=0.90, lightness=0.65 gives vibrant colors readable on dark bg.
 // Exported so it can be table-tested from the dashboard_test package.
 func RainbowText(s string, frame int) string {
@@ -1225,7 +1263,11 @@ func RainbowText(s string, frame int) string {
 	}
 	var b strings.Builder
 	for i, r := range runes {
-		hue := float64(((i*30-frame*12)%360 + 360) % 360)
+		raw := float64(i)*waveLetterStep - float64(frame)*waveFrameStep
+		hue := math.Mod(raw, 360)
+		if hue < 0 {
+			hue += 360
+		}
 		hex := hslToHex(hue, 0.90, 0.65)
 		st := lipgloss.NewStyle().Foreground(lipgloss.Color(hex))
 		b.WriteString(st.Render(string(r)))
@@ -1236,6 +1278,8 @@ func RainbowText(s string, frame int) string {
 // GrayscaleText is the monochrome twin of RainbowText: the same clockwise
 // traveling wave, expressed as per-letter LIGHTNESS instead of hue. Letters
 // shimmer between dim gray and pure white (saturation 0 → grays only).
+// Uses the same waveLetterStep and waveFrameStep constants as RainbowText so
+// the sweep timing is identical in both color modes.
 // Deterministic for a given (s, frame) pair; exported for table tests.
 func GrayscaleText(s string, frame int) string {
 	runes := []rune(s)
@@ -1244,7 +1288,12 @@ func GrayscaleText(s string, frame int) string {
 	}
 	var b strings.Builder
 	for i, r := range runes {
-		phase := float64(((i*30-frame*12)%360+360)%360) * math.Pi / 180
+		raw := float64(i)*waveLetterStep - float64(frame)*waveFrameStep
+		deg := math.Mod(raw, 360)
+		if deg < 0 {
+			deg += 360
+		}
+		phase := deg * math.Pi / 180
 		lightness := 0.65 + 0.35*math.Cos(phase) // range [0.30, 1.00]
 		hex := hslToHex(0, 0, lightness)
 		st := lipgloss.NewStyle().Foreground(lipgloss.Color(hex))
