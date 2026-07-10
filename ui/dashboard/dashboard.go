@@ -5,6 +5,15 @@
 //     tea.Cmd (tea.Batch for parallel fetches); no hand-rolled goroutines.
 //   - In-flight guard: on tickMsg, a fetch is re-issued ONLY when its loading flag
 //     is clear, preventing stacking of slow fetches across 5s ticks.
+//   - Watchdog wrapper (Change 23): each fetch Cmd runs the Deps call in an inner
+//     goroutine raced against time.After(watchdogTimeout). On timeout the Cmd
+//     delivers ErrFetchTimeout so the loading flag clears through the normal path.
+//     The abandoned inner goroutine may leak until its I/O eventually completes —
+//     this is bounded and deliberate; we never block the Msg delivery on it.
+//   - Tick-counter self-heal (Change 23): per-fetch tick counters track how many
+//     consecutive TickMsgs a loading flag has been true. At WatchdogTicks (12
+//     ticks = 60s) the flag is force-cleared and the fetch re-issued, covering
+//     the extreme case where even the watchdog goroutine was lost (e.g. OS suspend).
 //   - Per-panel error states: limitsErr and statsErr are stored independently;
 //     each panel renders its own degraded message (no global failure screen).
 //   - Injected now func() time.Time for deterministic golden tests.
@@ -12,6 +21,7 @@
 package dashboard
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -29,6 +39,28 @@ import (
 	"github.com/jesusrobot0/clauchy/ui/theme"
 )
 
+// ErrFetchTimeout is the sentinel error delivered by the watchdog wrapper when
+// a Deps fetch call does not return within fetchWatchdogTimeout. The loading
+// flag is cleared through the normal Msg path so the dashboard can self-heal.
+// The inner goroutine is abandoned (it will eventually complete or be killed
+// when the process exits) — we deliberately never block the Msg on it.
+var ErrFetchTimeout = errors.New("dashboard: fetch watchdog timeout")
+
+// fetchWatchdogTimeout is the hard deadline for each Deps fetch call.
+// Chosen to be comfortably above every legitimate slow path:
+//   - limits.FetchTimeout:  2.5s   (HTTP deadline)
+//   - limits lock hold:    ~3s     (bounded try-lock)
+//   - oauth.RefreshTimeout: 20s    (token refresh circuit breaker)
+//     Total worst case ~25s; 30s gives 5s headroom.
+const fetchWatchdogTimeout = 30 * time.Second
+
+// WatchdogTicks is the number of consecutive TickMsgs (5s each = 60s) a
+// loading flag may remain true before the tick-counter self-heal force-clears
+// it and re-issues the fetch. This covers the extreme suspend edge case where
+// even the watchdog goroutine was lost.
+// Exported so tests can reference it without hardcoding the value.
+const WatchdogTicks = 12
+
 // ─── Deps & message types ─────────────────────────────────────────────────────
 
 // Deps holds the injectable data-fetching functions. main wires real closures;
@@ -41,6 +73,12 @@ type Deps struct {
 	// On fetch failure, return the error; the dashboard renders nothing on the
 	// left side of the footer in that case.
 	FetchStatus func() (status.Status, error)
+
+	// WatchdogTimeout overrides fetchWatchdogTimeout for tests that need a
+	// shorter deadline so the test suite stays fast. The exported surface
+	// (fetchLimitsCmd etc.) always uses this when non-zero; production callers
+	// leave it at zero so the default fetchWatchdogTimeout applies.
+	WatchdogTimeout time.Duration
 }
 
 // LimitsMsg carries the result of a FetchLimits call.
@@ -132,6 +170,17 @@ type Model struct {
 	loadingStats  bool
 	loadingStatus bool
 
+	// limitsInFlightTicks counts consecutive TickMsgs while loadingLimits is
+	// true. When it reaches WatchdogTicks the tick-counter self-heal fires:
+	// the flag is force-cleared, the counter reset to 0, and the fetch
+	// re-issued on the same tick. This covers extreme suspend where even the
+	// watchdog goroutine was lost.
+	limitsInFlightTicks int
+	// statsInFlightTicks is the same counter for loadingStats.
+	statsInFlightTicks int
+	// statusInFlightTicks is the same counter for loadingStatus.
+	statusInFlightTicks int
+
 	limits    limits.Usage
 	limitsErr error
 	hasLimits bool
@@ -216,6 +265,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case LimitsMsg:
 		m.loadingLimits = false
+		m.limitsInFlightTicks = 0 // watchdog tick counter reset on Msg arrival
 		m.limits = msg.Usage
 		m.limitsErr = msg.Err
 		m.hasLimits = msg.Err == nil && !msg.Usage.CachedAt.IsZero()
@@ -232,6 +282,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case StatsMsg:
 		m.loadingStats = false
+		m.statsInFlightTicks = 0 // watchdog tick counter reset on Msg arrival
 		m.stats = msg.Stats
 		m.statsErr = msg.Err
 		m.hasStats = msg.Err == nil
@@ -240,6 +291,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case StatusMsg:
 		m.loadingStatus = false
+		m.statusInFlightTicks = 0 // watchdog tick counter reset on Msg arrival
 		m.statusData = msg.Status
 		m.statusErr = msg.Err
 		m.hasStatus = msg.Err == nil
@@ -253,18 +305,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case TickMsg:
 		var cmds []tea.Cmd
 		// In-flight guard: only re-issue a fetch when its loading flag is clear.
+		// Belt-and-braces self-heal: if the loading flag has been true for
+		// WatchdogTicks consecutive TickMsgs (e.g. 12 × 5s = 60s), the watchdog
+		// goroutine itself may have been lost (extreme OS suspend). Force-clear
+		// the flag and re-issue so the dashboard can recover.
 		// Note: the loading flags guard fetches only; they no longer drive the
 		// header animation (pulse-only gate since Change 20).
+		if m.loadingLimits {
+			m.limitsInFlightTicks++
+			if m.limitsInFlightTicks >= WatchdogTicks {
+				// Self-heal: force-clear and re-issue.
+				m.loadingLimits = false
+				m.limitsInFlightTicks = 0
+			}
+		}
 		if !m.loadingLimits {
 			m.loadingLimits = true
 			cmds = append(cmds, fetchLimitsCmd(m.deps))
+		}
+
+		if m.loadingStats {
+			m.statsInFlightTicks++
+			if m.statsInFlightTicks >= WatchdogTicks {
+				m.loadingStats = false
+				m.statsInFlightTicks = 0
+			}
 		}
 		if !m.loadingStats {
 			m.loadingStats = true
 			cmds = append(cmds, fetchStatsCmd(m.deps))
 		}
+
 		// The status branch also requires a wired FetchStatus dep: with a nil
 		// dep there is no fetch to issue, so the loading flag must not be touched.
+		if m.loadingStatus && m.deps.FetchStatus != nil {
+			m.statusInFlightTicks++
+			if m.statusInFlightTicks >= WatchdogTicks {
+				m.loadingStatus = false
+				m.statusInFlightTicks = 0
+			}
+		}
 		if !m.loadingStatus && m.deps.FetchStatus != nil {
 			m.loadingStatus = true
 			cmds = append(cmds, fetchStatusCmd(m.deps))
@@ -1405,28 +1485,87 @@ func BuildBar(pct float64, barLen int) string {
 
 // ─── Command helpers ──────────────────────────────────────────────────────────
 
+// watchdogFor returns the effective watchdog timeout for a Deps: the injectable
+// WatchdogTimeout field when non-zero (tests use this to stay fast), otherwise
+// the package-level fetchWatchdogTimeout.
+func watchdogFor(d Deps) time.Duration {
+	if d.WatchdogTimeout > 0 {
+		return d.WatchdogTimeout
+	}
+	return fetchWatchdogTimeout
+}
+
+// fetchLimitsCmd returns a Cmd that races the FetchLimits call against a hard
+// deadline (watchdog). If the fetch does not return within watchdogFor(d), the
+// Cmd delivers LimitsMsg{Err: ErrFetchTimeout}. The abandoned inner goroutine
+// may still complete later; its result is silently dropped (bounded leak).
 func fetchLimitsCmd(d Deps) tea.Cmd {
 	return func() tea.Msg {
-		u, err := d.FetchLimits()
-		return LimitsMsg{Usage: u, Err: err}
+		type result struct {
+			u   limits.Usage
+			err error
+		}
+		ch := make(chan result, 1) // buffered so the inner goroutine never blocks
+		go func() {
+			u, err := d.FetchLimits()
+			ch <- result{u, err}
+		}()
+		select {
+		case r := <-ch:
+			return LimitsMsg{Usage: r.u, Err: r.err}
+		case <-time.After(watchdogFor(d)):
+			// Watchdog fired. The inner goroutine is abandoned — it will eventually
+			// complete and send to ch (buffered, no block), where the value is
+			// silently discarded by the GC. This is a deliberate bounded leak.
+			return LimitsMsg{Err: fmt.Errorf("%w: FetchLimits", ErrFetchTimeout)}
+		}
 	}
 }
 
+// fetchStatsCmd returns a Cmd with the same watchdog wrapper for FetchStats.
 func fetchStatsCmd(d Deps) tea.Cmd {
 	return func() tea.Msg {
-		s, err := d.FetchStats()
-		return StatsMsg{Stats: s, Err: err}
+		type result struct {
+			s   transcript.Stats
+			err error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			s, err := d.FetchStats()
+			ch <- result{s, err}
+		}()
+		select {
+		case r := <-ch:
+			return StatsMsg{Stats: r.s, Err: r.err}
+		case <-time.After(watchdogFor(d)):
+			return StatsMsg{Err: fmt.Errorf("%w: FetchStats", ErrFetchTimeout)}
+		}
 	}
 }
 
+// fetchStatusCmd returns a Cmd with the watchdog wrapper for FetchStatus, or
+// nil when FetchStatus is not wired (legacy tests without status dep).
 func fetchStatusCmd(d Deps) tea.Cmd {
 	if d.FetchStatus == nil {
 		// FetchStatus not wired (e.g. legacy tests without status dep): no-op.
 		return nil
 	}
 	return func() tea.Msg {
-		st, err := d.FetchStatus()
-		return StatusMsg{Status: st, Err: err}
+		type result struct {
+			st  status.Status
+			err error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			st, err := d.FetchStatus()
+			ch <- result{st, err}
+		}()
+		select {
+		case r := <-ch:
+			return StatusMsg{Status: r.st, Err: r.err}
+		case <-time.After(watchdogFor(d)):
+			return StatusMsg{Err: fmt.Errorf("%w: FetchStatus", ErrFetchTimeout)}
+		}
 	}
 }
 

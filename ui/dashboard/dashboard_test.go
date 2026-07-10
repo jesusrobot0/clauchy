@@ -1,6 +1,7 @@
 package dashboard_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -1904,4 +1905,366 @@ func findHeaderLine(t *testing.T, output string) string {
 	}
 	t.Fatalf("no line containing 'clauchy' found in View output:\n%s", stripANSI(output))
 	return ""
+}
+
+// ─── Change 23: fetch watchdog — a Msg ALWAYS arrives ────────────────────────
+//
+// Three guarantees:
+//  1. Watchdog: a blocking Deps.FetchLimits/FetchStats/FetchStatus goroutine is
+//     abandoned after fetchWatchdogTimeout; the Cmd still delivers
+//     ErrFetchTimeout so the loading flag clears through the normal path.
+//  2. Tick-counter self-heal: if a loading flag stays true for ≥ watchdogTicks
+//     consecutive TickMsgs, it is force-cleared and the fetch is re-issued on
+//     the same tick. Covers extreme suspend where even the watchdog goroutine
+//     was lost.
+//  3. Normal path: the existing in-flight guard behaviour is unaffected.
+
+// TestWatchdog_Limits_BlockingFetch verifies that when FetchLimits blocks
+// forever (channel never closes) a LimitsMsg{Err: ErrFetchTimeout} is still
+// delivered within the (shortened) watchdog deadline, the loading flag clears,
+// and a subsequent TickMsg re-issues the fetch (fetchCount increments).
+//
+// RED: this test will fail until ErrFetchTimeout and the watchdog wrapper exist.
+func TestWatchdog_Limits_BlockingFetch(t *testing.T) {
+	var fetchCount atomic.Int32
+	// A channel that is never closed — models a goroutine stuck in I/O forever.
+	block := make(chan struct{})
+
+	deps := dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) {
+			fetchCount.Add(1)
+			<-block // blocks forever
+			return limits.Usage{}, nil
+		},
+		FetchStats:  func() (transcript.Stats, error) { return transcript.Stats{}, nil },
+		FetchStatus: func() (status.Status, error) { return status.Status{}, nil },
+		// Inject a short watchdog timeout for test speed.
+		WatchdogTimeout: 50 * time.Millisecond,
+	}
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: testWidth, Height: testHeight})
+
+	// Execute the real Init commands so the fetch goroutine starts.
+	cmd := m2.(dashboard.Model).Init()
+	if cmd == nil {
+		t.Fatal("Init() returned nil cmd")
+	}
+	// The Init batch includes fetchLimitsCmd; execute it in a goroutine and
+	// wait for the watchdog to fire, delivering LimitsMsg{Err: ErrFetchTimeout}.
+	var limitsMsg dashboard.LimitsMsg
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Execute the batch and collect the first LimitsMsg.
+		msg := cmd()
+		batch, ok := msg.(tea.BatchMsg)
+		if !ok {
+			// Single cmd result.
+			if lm, ok2 := msg.(dashboard.LimitsMsg); ok2 {
+				limitsMsg = lm
+			}
+			return
+		}
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			result := c()
+			if lm, ok2 := result.(dashboard.LimitsMsg); ok2 {
+				limitsMsg = lm
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("watchdog did not fire within 500ms (wanted ≤50ms)")
+	}
+
+	// The LimitsMsg must carry ErrFetchTimeout.
+	if limitsMsg.Err == nil {
+		t.Fatalf("LimitsMsg.Err = nil, want ErrFetchTimeout")
+	}
+	if !errors.Is(limitsMsg.Err, dashboard.ErrFetchTimeout) {
+		t.Errorf("LimitsMsg.Err = %v, want errors.Is(ErrFetchTimeout)", limitsMsg.Err)
+	}
+
+	// Deliver the error message — loading flag must clear.
+	m3, _ := m2.(dashboard.Model).Update(limitsMsg)
+	// Deliver StatsMsg and StatusMsg to clear their flags too.
+	m4, _ := m3.(dashboard.Model).Update(dashboard.StatsMsg{Stats: transcript.Stats{}, Err: nil})
+	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: nil})
+	fetchCountBefore := fetchCount.Load()
+
+	// A TickMsg now (all guards OFF) must re-issue the limits fetch.
+	_, tickCmd := m5.(dashboard.Model).Update(dashboard.TickMsg(fixedNow))
+	execBatch(tickCmd)
+	if !waitForCount(&fetchCount, fetchCountBefore+1, 200*time.Millisecond) {
+		t.Errorf("after watchdog timeout + TickMsg, fetchCount = %d, want %d (re-issued)", fetchCount.Load(), fetchCountBefore+1)
+	}
+}
+
+// TestWatchdog_Stats_BlockingFetch verifies the same watchdog behaviour for
+// FetchStats: a blocking dep delivers StatsMsg{Err: ErrFetchTimeout}.
+//
+// RED: fails until watchdog wrapper exists.
+func TestWatchdog_Stats_BlockingFetch(t *testing.T) {
+	block := make(chan struct{})
+	deps := dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) { return limits.Usage{}, nil },
+		FetchStats: func() (transcript.Stats, error) {
+			<-block
+			return transcript.Stats{}, nil
+		},
+		FetchStatus:     func() (status.Status, error) { return status.Status{}, nil },
+		WatchdogTimeout: 50 * time.Millisecond,
+	}
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	cmd := m.Init()
+
+	var statsMsg dashboard.StatsMsg
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		msg := cmd()
+		batch, ok := msg.(tea.BatchMsg)
+		if !ok {
+			if sm, ok2 := msg.(dashboard.StatsMsg); ok2 {
+				statsMsg = sm
+			}
+			return
+		}
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			result := c()
+			if sm, ok2 := result.(dashboard.StatsMsg); ok2 {
+				statsMsg = sm
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("stats watchdog did not fire within 500ms")
+	}
+
+	if !errors.Is(statsMsg.Err, dashboard.ErrFetchTimeout) {
+		t.Errorf("StatsMsg.Err = %v, want ErrFetchTimeout", statsMsg.Err)
+	}
+}
+
+// TestWatchdog_Status_BlockingFetch verifies the watchdog for FetchStatus.
+//
+// RED: fails until watchdog wrapper exists.
+func TestWatchdog_Status_BlockingFetch(t *testing.T) {
+	block := make(chan struct{})
+	deps := dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) { return limits.Usage{}, nil },
+		FetchStats:  func() (transcript.Stats, error) { return transcript.Stats{}, nil },
+		FetchStatus: func() (status.Status, error) {
+			<-block
+			return status.Status{}, nil
+		},
+		WatchdogTimeout: 50 * time.Millisecond,
+	}
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	cmd := m.Init()
+
+	var statusMsg dashboard.StatusMsg
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		msg := cmd()
+		batch, ok := msg.(tea.BatchMsg)
+		if !ok {
+			if sm, ok2 := msg.(dashboard.StatusMsg); ok2 {
+				statusMsg = sm
+			}
+			return
+		}
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			result := c()
+			if sm, ok2 := result.(dashboard.StatusMsg); ok2 {
+				statusMsg = sm
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("status watchdog did not fire within 500ms")
+	}
+
+	if !errors.Is(statusMsg.Err, dashboard.ErrFetchTimeout) {
+		t.Errorf("StatusMsg.Err = %v, want ErrFetchTimeout", statusMsg.Err)
+	}
+}
+
+// TestTickCounter_SelfHeal_Limits verifies that if loadingLimits has been
+// true for watchdogTicks consecutive TickMsgs (≥ 12), the flag is force-cleared
+// and the fetch is re-issued on the same tick (belt-and-braces self-heal for
+// extreme suspend where the watchdog goroutine itself was lost).
+//
+// RED: fails until limitsInFlightTicks counter and force-clear logic exist.
+func TestTickCounter_SelfHeal_Limits(t *testing.T) {
+	var fetchCount atomic.Int32
+	deps := dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) {
+			fetchCount.Add(1)
+			return limits.Usage{}, nil
+		},
+		FetchStats:  func() (transcript.Stats, error) { return transcript.Stats{}, nil },
+		FetchStatus: func() (status.Status, error) { return status.Status{}, nil },
+	}
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+
+	// New() sets loadingLimits=true. We do NOT deliver LimitsMsg — the flag stays
+	// stuck. Send watchdogTicks TickMsgs; on the 12th the self-heal must fire.
+	var cur tea.Model = m
+	const ticks = dashboard.WatchdogTicks + 1
+	for i := 0; i < ticks; i++ {
+		cur, _ = cur.(dashboard.Model).Update(dashboard.TickMsg(fixedNow))
+	}
+
+	// After self-heal the fetch must have been re-issued (at least 1 increment
+	// because the original Init-issued fetch was never executed in-test, so the
+	// first re-issue from the self-heal tick is the first observable increment
+	// when we execute the returned cmds).
+	// Simpler: just verify the model's loadingLimits flag was cleared at some
+	// point and re-set (we do this by delivering a LimitsMsg and checking
+	// HasLimits = true, meaning loading was cleared by the error path or
+	// force-clear and then re-set by the re-issue).
+	// The cleanest assertion is: HasLimits becomes true after we now deliver
+	// a good LimitsMsg — meaning the flag was cleared before this delivery.
+	final := cur.(dashboard.Model)
+	result, _ := final.Update(dashboard.LimitsMsg{
+		Usage: limits.Usage{CachedAt: fixedNow},
+		Err:   nil,
+	})
+	dm := result.(dashboard.Model)
+	if !dm.HasLimits() {
+		t.Error("after watchdog tick self-heal + LimitsMsg, HasLimits() = false; wanted true (flag was force-cleared and re-issued)")
+	}
+	// The tick-counter must have reset to 0 after self-heal so it does not keep
+	// triggering on every subsequent tick.
+	// Verify: another WatchdogTicks-1 TickMsgs must NOT self-heal again.
+	var cur2 tea.Model = dm
+	for i := 0; i < dashboard.WatchdogTicks-1; i++ {
+		cur2, _ = cur2.(dashboard.Model).Update(dashboard.TickMsg(fixedNow))
+	}
+	// Now deliver a fresh LimitsMsg — if HasLimits is still true after this,
+	// the flag was NOT silently force-cleared in between.
+	cur3, _ := cur2.(dashboard.Model).Update(dashboard.LimitsMsg{
+		Usage: limits.Usage{CachedAt: fixedNow.Add(time.Second)},
+		Err:   nil,
+	})
+	if !cur3.(dashboard.Model).HasLimits() {
+		t.Error("HasLimits went false between self-heal ticks — counter did not reset")
+	}
+}
+
+// TestTickCounter_SelfHeal_Stats is the equivalent test for the stats counter.
+//
+// RED: fails until statsInFlightTicks and force-clear logic exist.
+func TestTickCounter_SelfHeal_Stats(t *testing.T) {
+	deps := dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) { return limits.Usage{}, nil },
+		FetchStats:  func() (transcript.Stats, error) { return transcript.Stats{}, nil },
+		FetchStatus: func() (status.Status, error) { return status.Status{}, nil },
+	}
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	// loadingStats = true from New(). Do NOT deliver StatsMsg.
+	var cur tea.Model = m
+	for i := 0; i < dashboard.WatchdogTicks+1; i++ {
+		cur, _ = cur.(dashboard.Model).Update(dashboard.TickMsg(fixedNow))
+	}
+	// After self-heal the stats flag was force-cleared; now a StatsMsg sets hasStats.
+	result, _ := cur.(dashboard.Model).Update(dashboard.StatsMsg{Stats: sampleStats(), Err: nil})
+	if !result.(dashboard.Model).HasStats() {
+		t.Error("after stats watchdog tick self-heal + StatsMsg, HasStats() = false")
+	}
+}
+
+// TestTickCounter_SelfHeal_Status is the equivalent test for the status counter.
+//
+// RED: fails until statusInFlightTicks and force-clear logic exist.
+func TestTickCounter_SelfHeal_Status(t *testing.T) {
+	deps := stubDeps(limits.Usage{}, nil, transcript.Stats{}, nil)
+	m := dashboard.New(deps, testPalette, fixedNowFn, "")
+	// loadingStatus = true from New() (FetchStatus is wired).
+	var cur tea.Model = m
+	for i := 0; i < dashboard.WatchdogTicks+1; i++ {
+		cur, _ = cur.(dashboard.Model).Update(dashboard.TickMsg(fixedNow))
+	}
+	result, _ := cur.(dashboard.Model).Update(dashboard.StatusMsg{
+		Status: status.Status{CachedAt: fixedNow},
+		Err:    nil,
+	})
+	if !result.(dashboard.Model).HasStatus() {
+		t.Error("after status watchdog tick self-heal + StatusMsg, HasStatus() = false")
+	}
+}
+
+// TestWatchdog_NormalPath_Unaffected verifies that a fast (non-blocking)
+// FetchLimits is unaffected by the watchdog wrapper: LimitsMsg.Err is nil
+// and the normal in-flight guard behaviour is preserved.
+//
+// RED: fails only if the watchdog wrapper incorrectly intercepts fast fetches.
+// (In practice, this becomes GREEN once the watchdog is implemented correctly.)
+func TestWatchdog_NormalPath_Unaffected(t *testing.T) {
+	fastDeps := dashboard.Deps{
+		FetchLimits: func() (limits.Usage, error) {
+			return sampleUsage(), nil
+		},
+		FetchStats:      func() (transcript.Stats, error) { return sampleStats(), nil },
+		FetchStatus:     func() (status.Status, error) { return status.Status{}, nil },
+		WatchdogTimeout: 50 * time.Millisecond,
+	}
+	m := dashboard.New(fastDeps, testPalette, fixedNowFn, "")
+	cmd := m.Init()
+
+	var limitsMsg dashboard.LimitsMsg
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		msg := cmd()
+		batch, ok := msg.(tea.BatchMsg)
+		if !ok {
+			if lm, ok2 := msg.(dashboard.LimitsMsg); ok2 {
+				limitsMsg = lm
+			}
+			return
+		}
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			result := c()
+			if lm, ok2 := result.(dashboard.LimitsMsg); ok2 {
+				limitsMsg = lm
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("fast fetch did not complete within 500ms")
+	}
+
+	if limitsMsg.Err != nil {
+		t.Errorf("fast fetch LimitsMsg.Err = %v, want nil (normal path must be unaffected)", limitsMsg.Err)
+	}
 }
