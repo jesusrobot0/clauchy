@@ -27,6 +27,9 @@ import (
 // byte-identical between a developer TTY and TTY-less CI.
 func TestMain(m *testing.M) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
+	// Production renders reset times in the user's local timezone. Pin the test
+	// timezone so goldens remain identical across developer machines and CI.
+	time.Local = time.FixedZone("dashboard-test", -6*60*60)
 	os.Exit(m.Run())
 }
 
@@ -1922,7 +1925,7 @@ func findHeaderLine(t *testing.T, output string) string {
 // TestWatchdog_Limits_BlockingFetch verifies that when FetchLimits blocks
 // forever (channel never closes) a LimitsMsg{Err: ErrFetchTimeout} is still
 // delivered within the (shortened) watchdog deadline, the loading flag clears,
-// and a subsequent TickMsg re-issues the fetch (fetchCount increments).
+// and a subsequent TickMsg does not stack a second blocked worker.
 //
 // RED: this test will fail until ErrFetchTimeout and the watchdog wrapper exist.
 func TestWatchdog_Limits_BlockingFetch(t *testing.T) {
@@ -1998,12 +2001,22 @@ func TestWatchdog_Limits_BlockingFetch(t *testing.T) {
 	m5, _ := m4.(dashboard.Model).Update(dashboard.StatusMsg{Status: status.Status{}, Err: nil})
 	fetchCountBefore := fetchCount.Load()
 
-	// A TickMsg now (all guards OFF) must re-issue the limits fetch.
+	// A TickMsg now (all model guards OFF) must not create a second worker while
+	// the timed-out call is still blocked behind the single-flight gate.
 	_, tickCmd := m5.(dashboard.Model).Update(dashboard.TickMsg(fixedNow))
-	execBatch(tickCmd)
-	if !waitForCount(&fetchCount, fetchCountBefore+1, 200*time.Millisecond) {
-		t.Errorf("after watchdog timeout + TickMsg, fetchCount = %d, want %d (re-issued)", fetchCount.Load(), fetchCountBefore+1)
+	msg := tickCmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok || len(batch) == 0 {
+		t.Fatalf("TickMsg command = %T, want non-empty tea.BatchMsg", msg)
 	}
+	result := batch[0]()
+	if lm, ok := result.(dashboard.LimitsMsg); !ok || !errors.Is(lm.Err, dashboard.ErrFetchTimeout) {
+		t.Fatalf("single-flight retry result = %#v, want LimitsMsg ErrFetchTimeout", result)
+	}
+	if got := fetchCount.Load(); got != fetchCountBefore {
+		t.Errorf("after synchronous retry, fetchCount = %d, want %d", got, fetchCountBefore)
+	}
+	close(block)
 }
 
 // TestWatchdog_Stats_BlockingFetch verifies the same watchdog behaviour for

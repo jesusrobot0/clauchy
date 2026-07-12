@@ -5,11 +5,9 @@
 //     tea.Cmd (tea.Batch for parallel fetches); no hand-rolled goroutines.
 //   - In-flight guard: on tickMsg, a fetch is re-issued ONLY when its loading flag
 //     is clear, preventing stacking of slow fetches across 5s ticks.
-//   - Watchdog wrapper (Change 23): each fetch Cmd runs the Deps call in an inner
-//     goroutine raced against time.After(watchdogTimeout). On timeout the Cmd
-//     delivers ErrFetchTimeout so the loading flag clears through the normal path.
-//     The abandoned inner goroutine may leak until its I/O eventually completes —
-//     this is bounded and deliberate; we never block the Msg delivery on it.
+//   - Watchdog wrapper: each source has a shared single-flight gate. A timed-out
+//     worker may continue until its I/O returns, but retries cannot spawn another
+//     worker for that source, bounding abandoned work to one goroutine.
 //   - Tick-counter self-heal (Change 23): per-fetch tick counters track how many
 //     consecutive TickMsgs a loading flag has been true. At WatchdogTicks (12
 //     ticks = 60s) the flag is force-cleared and the fetch re-issued, covering
@@ -79,7 +77,30 @@ type Deps struct {
 	// (fetchLimitsCmd etc.) always uses this when non-zero; production callers
 	// leave it at zero so the default fetchWatchdogTimeout applies.
 	WatchdogTimeout time.Duration
+
+	limitsGate *fetchGate
+	statsGate  *fetchGate
+	statusGate *fetchGate
 }
+
+type fetchGate struct {
+	running chan struct{}
+}
+
+func newFetchGate() *fetchGate {
+	return &fetchGate{running: make(chan struct{}, 1)}
+}
+
+func (g *fetchGate) tryStart() bool {
+	select {
+	case g.running <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (g *fetchGate) done() { <-g.running }
 
 // LimitsMsg carries the result of a FetchLimits call.
 // Exported so tests can send it directly to Model.Update.
@@ -219,6 +240,9 @@ func NewColorful(d Deps, p theme.Palette, now func() time.Time, plan string) Mod
 // dep, Init never issues a status fetch, so a true flag would never clear and
 // the header animation would run forever.
 func newWithScheme(d Deps, p theme.Palette, s Scheme, now func() time.Time, plan string) Model {
+	d.limitsGate = newFetchGate()
+	d.statsGate = newFetchGate()
+	d.statusGate = newFetchGate()
 	return Model{
 		deps:            d,
 		palette:         p,
@@ -1497,26 +1521,29 @@ func watchdogFor(d Deps) time.Duration {
 
 // fetchLimitsCmd returns a Cmd that races the FetchLimits call against a hard
 // deadline (watchdog). If the fetch does not return within watchdogFor(d), the
-// Cmd delivers LimitsMsg{Err: ErrFetchTimeout}. The abandoned inner goroutine
-// may still complete later; its result is silently dropped (bounded leak).
+// Cmd delivers LimitsMsg{Err: ErrFetchTimeout}. The per-source gate prevents a
+// retry from spawning another worker until the timed-out call actually returns.
 func fetchLimitsCmd(d Deps) tea.Cmd {
 	return func() tea.Msg {
+		if !d.limitsGate.tryStart() {
+			return LimitsMsg{Err: fmt.Errorf("%w: FetchLimits still running", ErrFetchTimeout)}
+		}
 		type result struct {
 			u   limits.Usage
 			err error
 		}
 		ch := make(chan result, 1) // buffered so the inner goroutine never blocks
 		go func() {
+			defer d.limitsGate.done()
 			u, err := d.FetchLimits()
 			ch <- result{u, err}
 		}()
+		timer := time.NewTimer(watchdogFor(d))
+		defer timer.Stop()
 		select {
 		case r := <-ch:
 			return LimitsMsg{Usage: r.u, Err: r.err}
-		case <-time.After(watchdogFor(d)):
-			// Watchdog fired. The inner goroutine is abandoned — it will eventually
-			// complete and send to ch (buffered, no block), where the value is
-			// silently discarded by the GC. This is a deliberate bounded leak.
+		case <-timer.C:
 			return LimitsMsg{Err: fmt.Errorf("%w: FetchLimits", ErrFetchTimeout)}
 		}
 	}
@@ -1525,19 +1552,25 @@ func fetchLimitsCmd(d Deps) tea.Cmd {
 // fetchStatsCmd returns a Cmd with the same watchdog wrapper for FetchStats.
 func fetchStatsCmd(d Deps) tea.Cmd {
 	return func() tea.Msg {
+		if !d.statsGate.tryStart() {
+			return StatsMsg{Err: fmt.Errorf("%w: FetchStats still running", ErrFetchTimeout)}
+		}
 		type result struct {
 			s   transcript.Stats
 			err error
 		}
 		ch := make(chan result, 1)
 		go func() {
+			defer d.statsGate.done()
 			s, err := d.FetchStats()
 			ch <- result{s, err}
 		}()
+		timer := time.NewTimer(watchdogFor(d))
+		defer timer.Stop()
 		select {
 		case r := <-ch:
 			return StatsMsg{Stats: r.s, Err: r.err}
-		case <-time.After(watchdogFor(d)):
+		case <-timer.C:
 			return StatsMsg{Err: fmt.Errorf("%w: FetchStats", ErrFetchTimeout)}
 		}
 	}
@@ -1551,19 +1584,25 @@ func fetchStatusCmd(d Deps) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
+		if !d.statusGate.tryStart() {
+			return StatusMsg{Err: fmt.Errorf("%w: FetchStatus still running", ErrFetchTimeout)}
+		}
 		type result struct {
 			st  status.Status
 			err error
 		}
 		ch := make(chan result, 1)
 		go func() {
+			defer d.statusGate.done()
 			st, err := d.FetchStatus()
 			ch <- result{st, err}
 		}()
+		timer := time.NewTimer(watchdogFor(d))
+		defer timer.Stop()
 		select {
 		case r := <-ch:
 			return StatusMsg{Status: r.st, Err: r.err}
-		case <-time.After(watchdogFor(d)):
+		case <-timer.C:
 			return StatusMsg{Err: fmt.Errorf("%w: FetchStatus", ErrFetchTimeout)}
 		}
 	}
