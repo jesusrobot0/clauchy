@@ -40,22 +40,26 @@ var (
 	// be parsed as a valid Claude credential document.
 	ErrInvalidCredentials = errors.New("oauth: invalid credentials")
 
-	// ErrRefreshRejected is returned by Token when the token-refresh endpoint
-	// responds with a non-2xx HTTP status (4xx or 5xx). Existing credentials
-	// are not modified. This is a permanent-ish rejection (bad grant, etc.) and
-	// must be distinguished from a transient network failure.
+	// ErrRefreshRejected is returned when the token-refresh endpoint rejects the
+	// grant with a 4xx response. Existing credentials are not modified.
 	ErrRefreshRejected = errors.New("oauth: refresh rejected")
 
-	// ErrRefreshTransient is returned by Token when the HTTP transport layer
-	// fails (connection refused, DNS failure, timeout) during a token refresh.
+	// ErrRefreshTransient is returned when the HTTP transport fails or the token
+	// endpoint responds with a retryable status (429 or 5xx).
 	// Unlike ErrRefreshRejected, this is a transient condition and callers may
 	// serve stale cached data rather than treating it as a credential error.
 	ErrRefreshTransient = errors.New("oauth: refresh transient error")
+
+	// ErrCredentialsChanged means another process replaced the shared Claude
+	// credentials after they were loaded. Callers should adopt the newer file.
+	ErrCredentialsChanged = errors.New("oauth: credentials changed concurrently")
 )
 
 // RefreshTimeout is the maximum time Token will wait for a token refresh
 // response. Wire an http.Client with this timeout in the composition root.
 const RefreshTimeout = 20 * time.Second
+
+const maxRefreshResponseBytes = 1 << 20
 
 // claudeClientID is the public OAuth client ID used by Claude Code.
 // It is sent in the JSON body of the refresh request (never as a header).
@@ -88,6 +92,7 @@ type Credentials struct {
 
 	rawDoc   map[string]json.RawMessage // entire top-level document
 	rawInner map[string]json.RawMessage // claudeAiOauth sub-tree
+	rawFile  []byte                     // exact source bytes for optimistic write-back
 }
 
 // PlanLabel derives a human-readable plan label from the OAuth credential
@@ -182,6 +187,7 @@ func Load(path string) (Credentials, error) {
 		RateLimitTier:    rateLimitTier,
 		rawDoc:           rawDoc,
 		rawInner:         rawInner,
+		rawFile:          append([]byte(nil), data...),
 	}, nil
 }
 
@@ -236,7 +242,7 @@ func (c Credentials) WriteBack(path, accessToken, refreshToken string, expiresAt
 		return fmt.Errorf("oauth writeback marshal doc: %w", err)
 	}
 
-	return atomicWrite0600(path, encoded)
+	return atomicWrite0600(path, encoded, c.rawFile)
 }
 
 // Token returns a valid access token for the credentials at cfg.CredentialsPath.
@@ -256,14 +262,30 @@ func Token(cfg Config, h *http.Client, now time.Time) (string, error) {
 	}
 
 	if !creds.NeedsRefresh(now) {
+		if strings.TrimSpace(creds.AccessToken) == "" {
+			return "", fmt.Errorf("%w: accessToken is empty", ErrInvalidCredentials)
+		}
 		return creds.AccessToken, nil
 	}
 
 	return doRefresh(cfg, h, now, creds)
 }
 
+// Refresh forces a token refresh regardless of the access token expiry. It is
+// used after the usage endpoint rejects an otherwise unexpired access token.
+func Refresh(cfg Config, h *http.Client, now time.Time) (string, error) {
+	creds, err := Load(cfg.CredentialsPath)
+	if err != nil {
+		return "", err
+	}
+	return doRefresh(cfg, h, now, creds)
+}
+
 // doRefresh performs the HTTP token refresh and updates the credentials file.
 func doRefresh(cfg Config, h *http.Client, now time.Time, creds Credentials) (string, error) {
+	if strings.TrimSpace(creds.RefreshToken) == "" {
+		return "", fmt.Errorf("%w: refreshToken is empty", ErrInvalidCredentials)
+	}
 	body := map[string]string{
 		"grant_type":    "refresh_token",
 		"client_id":     claudeClientID,
@@ -292,11 +314,17 @@ func doRefresh(cfg Config, h *http.Client, now time.Time, creds Credentials) (st
 	}
 	defer resp.Body.Close()
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxRefreshResponseBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("oauth refresh read body: %w", err)
 	}
+	if len(respBytes) > maxRefreshResponseBytes {
+		return "", fmt.Errorf("oauth refresh read body: response exceeds %d bytes", maxRefreshResponseBytes)
+	}
 
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return "", fmt.Errorf("%w: status %d", ErrRefreshTransient, resp.StatusCode)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("%w: status %d", ErrRefreshRejected, resp.StatusCode)
 	}
@@ -309,17 +337,43 @@ func doRefresh(cfg Config, h *http.Client, now time.Time, creds Credentials) (st
 	if err := json.Unmarshal(respBytes, &refreshResp); err != nil {
 		return "", fmt.Errorf("oauth refresh parse response: %w", err)
 	}
+	if strings.TrimSpace(refreshResp.AccessToken) == "" {
+		return "", fmt.Errorf("oauth refresh parse response: access_token missing or empty")
+	}
 
 	expiresAtMs, err := resolveExpiresIn(refreshResp.ExpiresIn, now)
 	if err != nil {
 		return "", fmt.Errorf("oauth refresh expires_in: %w", err)
 	}
+	if expiresAtMs <= now.UnixMilli() {
+		return "", fmt.Errorf("oauth refresh expires_in: expiry is not in the future")
+	}
 
-	if err := creds.WriteBack(cfg.CredentialsPath,
+	// Re-read immediately before commit so unrelated fields changed by Claude
+	// Code while the request was in flight are preserved. If another process
+	// rotated the refresh token, its newer credential state wins.
+	latest, err := Load(cfg.CredentialsPath)
+	if err != nil {
+		return "", fmt.Errorf("oauth refresh reload credentials: %w", err)
+	}
+	if latest.RefreshToken != creds.RefreshToken {
+		if strings.TrimSpace(latest.AccessToken) == "" {
+			return "", fmt.Errorf("%w: credentials changed during refresh", ErrRefreshTransient)
+		}
+		return latest.AccessToken, nil
+	}
+
+	if err := latest.WriteBack(cfg.CredentialsPath,
 		refreshResp.AccessToken,
 		refreshResp.RefreshToken, // empty → WriteBack preserves existing
 		expiresAtMs,
-	); err != nil {
+	); errors.Is(err, ErrCredentialsChanged) {
+		winner, loadErr := Load(cfg.CredentialsPath)
+		if loadErr != nil || strings.TrimSpace(winner.AccessToken) == "" {
+			return "", fmt.Errorf("%w: credentials changed during refresh", ErrRefreshTransient)
+		}
+		return winner.AccessToken, nil
+	} else if err != nil {
 		return "", fmt.Errorf("oauth refresh writeback: %w", err)
 	}
 
@@ -374,7 +428,7 @@ func decodeExpiresAt(raw json.RawMessage) (int64, error) {
 // guaranteed to be atomic (same filesystem, no cross-device move).
 // Mode 0600 is set before any token bytes land on disk so that there is
 // never a window where the inode is world-readable.
-func atomicWrite0600(dest string, data []byte) error {
+func atomicWrite0600(dest string, data, expected []byte) error {
 	dir := filepath.Dir(dest)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("oauth mkdir: %w", err)
@@ -404,10 +458,27 @@ func atomicWrite0600(dest string, data []byte) error {
 		os.Remove(tmpName)
 		return fmt.Errorf("oauth close temp: %w", err)
 	}
+	current, err := os.ReadFile(dest)
+	if err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("oauth verify current credentials: %w", err)
+	}
+	if !bytes.Equal(current, expected) {
+		os.Remove(tmpName)
+		return ErrCredentialsChanged
+	}
 
 	if err := os.Rename(tmpName, dest); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("oauth rename: %w", err)
+	}
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("oauth open directory for fsync: %w", err)
+	}
+	defer dirFile.Close()
+	if err := dirFile.Sync(); err != nil {
+		return fmt.Errorf("oauth fsync directory: %w", err)
 	}
 	return nil
 }

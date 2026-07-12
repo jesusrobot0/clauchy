@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +71,7 @@ func buildCachePayload(cachedAt time.Time) []byte {
 }
 
 // okTok is a TokenFunc that always succeeds.
-func okTok() (string, error) { return "test-bearer-token", nil }
+func okTok(bool) (string, error) { return "test-bearer-token", nil }
 
 // ----- Fetch tests (T-2.4) -----
 
@@ -97,6 +98,108 @@ func TestFetch_HappyPath(t *testing.T) {
 	wantReset := time.Date(2026, 7, 7, 15, 0, 0, 0, time.UTC)
 	if !u.FiveHour.ResetsAt.Equal(wantReset) {
 		t.Errorf("FiveHour.ResetsAt = %v, want %v", u.FiveHour.ResetsAt, wantReset)
+	}
+}
+
+func TestFetch_RejectsOversizedResponse(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, strings.Repeat("x", 3<<20))
+	}))
+	defer ts.Close()
+
+	_, err := limits.Fetch(context.Background(), ts.Client(), "token", ts.URL)
+	if !errors.Is(err, limits.ErrTransient) {
+		t.Fatalf("Fetch() error = %v, want ErrTransient", err)
+	}
+}
+
+func TestCached_FutureTimestampForcesFetch(t *testing.T) {
+	t.Parallel()
+	c := cache.New(t.TempDir())
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	if err := c.Write("usage.json", buildCachePayload(now.Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		fmt.Fprint(w, validAPIResponse)
+	}))
+	defer ts.Close()
+
+	_, err := cachedFast(context.Background(), c, ts.Client(), ts.URL, okTok, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("usage requests = %d, want 1", requests)
+	}
+}
+
+func TestCached_UnauthorizedForcesRefreshAndRetriesOnce(t *testing.T) {
+	t.Parallel()
+
+	c := cache.New(t.TempDir())
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	var requests, forcedRefreshes int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("Authorization") != "Bearer refreshed-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, validAPIResponse)
+	}))
+	defer ts.Close()
+
+	tok := func(force bool) (string, error) {
+		if force {
+			forcedRefreshes++
+			return "refreshed-token", nil
+		}
+		return "revoked-token", nil
+	}
+
+	u, err := cachedFast(context.Background(), c, ts.Client(), ts.URL, tok, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("Cached() error: %v", err)
+	}
+	if requests != 2 {
+		t.Errorf("usage requests = %d, want 2", requests)
+	}
+	if forcedRefreshes != 1 {
+		t.Errorf("forced refreshes = %d, want 1", forcedRefreshes)
+	}
+	if u.CachedAt.IsZero() {
+		t.Error("CachedAt is zero after successful retry")
+	}
+}
+
+func TestCached_RefreshedTokenRejectedPropagatesReauth(t *testing.T) {
+	t.Parallel()
+
+	c := cache.New(t.TempDir())
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	var forcedRefreshes int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer ts.Close()
+
+	tok := func(force bool) (string, error) {
+		if force {
+			forcedRefreshes++
+		}
+		return "token", nil
+	}
+
+	_, err := cachedFast(context.Background(), c, ts.Client(), ts.URL, tok, func() time.Time { return now })
+	if !errors.Is(err, oauth.ErrRefreshRejected) {
+		t.Fatalf("Cached() error = %v, want ErrRefreshRejected", err)
+	}
+	if forcedRefreshes != 1 {
+		t.Errorf("forced refreshes = %d, want 1", forcedRefreshes)
 	}
 }
 
@@ -343,7 +446,7 @@ func TestCached_TokErrRefreshRejected_WithStale_ReturnsStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rejectedTok := func() (string, error) { return "", oauth.ErrRefreshRejected }
+	rejectedTok := func(bool) (string, error) { return "", oauth.ErrRefreshRejected }
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("Cached() must not call the usage API when tok() fails")
@@ -377,7 +480,7 @@ func TestCached_TokErrRefreshRejected_NoUsableCache_PropagatesErr(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	rejectedTok := func() (string, error) { return "", oauth.ErrRefreshRejected }
+	rejectedTok := func(bool) (string, error) { return "", oauth.ErrRefreshRejected }
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("Cached() must not call the usage API when tok() fails")
@@ -499,7 +602,7 @@ func TestCached_UsageJSONContainsNoTokenMaterial(t *testing.T) {
 
 	now := time.Now()
 	const sensitiveToken = "sk-ant-secret-token"
-	tok := func() (string, error) { return sensitiveToken, nil }
+	tok := func(bool) (string, error) { return sensitiveToken, nil }
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -725,7 +828,7 @@ func TestCached_TransportError_WithStale_ReturnsStale(t *testing.T) {
 	}
 
 	// Simulate a transport error (connection refused, timeout) from the token refresh.
-	transientTok := func() (string, error) {
+	transientTok := func(bool) (string, error) {
 		return "", fmt.Errorf("%w: dial tcp: connection refused", oauth.ErrRefreshTransient)
 	}
 
@@ -759,7 +862,7 @@ func TestCached_TransportError_NoCache_ReturnsLoading(t *testing.T) {
 	// No cache file.
 
 	now := time.Now()
-	transientTok := func() (string, error) {
+	transientTok := func(bool) (string, error) {
 		return "", fmt.Errorf("%w: timeout", oauth.ErrRefreshTransient)
 	}
 
@@ -794,7 +897,7 @@ func TestCached_ErrNoCredentials_PropagatesEvenWithStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	noCredsTok := func() (string, error) { return "", oauth.ErrNoCredentials }
+	noCredsTok := func(bool) (string, error) { return "", oauth.ErrNoCredentials }
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("Cached() must not call usage API when tok() fails")
@@ -822,7 +925,7 @@ func TestCached_ErrInvalidCredentials_PropagatesEvenWithStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	invalidCredsTok := func() (string, error) { return "", oauth.ErrInvalidCredentials }
+	invalidCredsTok := func(bool) (string, error) { return "", oauth.ErrInvalidCredentials }
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("Cached() must not call usage API when tok() fails")
@@ -847,7 +950,7 @@ func TestCached_HTTP4xxRejection_NoCache_PropagatesErr(t *testing.T) {
 	// No cache.
 
 	now := time.Now()
-	rejectedTok := func() (string, error) {
+	rejectedTok := func(bool) (string, error) {
 		return "", fmt.Errorf("%w: status 401", oauth.ErrRefreshRejected)
 	}
 

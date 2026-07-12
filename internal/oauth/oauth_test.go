@@ -242,6 +242,31 @@ func TestWriteBack_FileMode0600(t *testing.T) {
 	}
 }
 
+func TestWriteBack_RejectsConcurrentCredentialChange(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := writeCredentials(t, dir, credentialDoc)
+	creds, err := oauth.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	concurrent := buildDoc(t, "newer-access", "newer-refresh", 1751900060000)
+	if err := os.WriteFile(path, []byte(concurrent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := creds.WriteBack(path, "stale-access", "stale-refresh", 1751900120000); !errors.Is(err, oauth.ErrCredentialsChanged) {
+		t.Fatalf("WriteBack() error = %v, want ErrCredentialsChanged", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != concurrent {
+		t.Fatal("WriteBack() overwrote newer concurrent credentials")
+	}
+}
+
 // ----- NeedsRefresh -----
 
 func TestNeedsRefresh(t *testing.T) {
@@ -496,7 +521,7 @@ func TestToken_RefreshRejected_CredentialsUnchanged(t *testing.T) {
 	}
 }
 
-func TestToken_Refresh5xx(t *testing.T) {
+func TestToken_Refresh5xxIsTransient(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
@@ -510,8 +535,74 @@ func TestToken_Refresh5xx(t *testing.T) {
 
 	cfg := oauth.Config{CredentialsPath: path, TokenURL: ts.URL}
 	_, err := oauth.Token(cfg, ts.Client(), now)
-	if !errors.Is(err, oauth.ErrRefreshRejected) {
-		t.Errorf("Token() error = %v, want ErrRefreshRejected", err)
+	if !errors.Is(err, oauth.ErrRefreshTransient) {
+		t.Errorf("Token() error = %v, want ErrRefreshTransient", err)
+	}
+}
+
+func TestToken_Refresh429IsTransient(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Unix(1700000000, 0)
+	path := writeCredentials(t, dir, buildDoc(t, "old", "ref", now.Add(time.Minute).UnixMilli()))
+
+	var captured *http.Request
+	ts := refreshServer(t, &captured, http.StatusTooManyRequests, `{}`)
+	defer ts.Close()
+
+	_, err := oauth.Token(oauth.Config{CredentialsPath: path, TokenURL: ts.URL}, ts.Client(), now)
+	if !errors.Is(err, oauth.ErrRefreshTransient) {
+		t.Fatalf("Token() error = %v, want ErrRefreshTransient", err)
+	}
+}
+
+func TestRefresh_ForcesUnexpiredTokenRefresh(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Unix(1700000000, 0)
+	path := writeCredentials(t, dir, buildDoc(t, "still-valid", "refresh-token", now.Add(time.Hour).UnixMilli()))
+
+	var captured *http.Request
+	ts := refreshServer(t, &captured, http.StatusOK, `{"access_token":"forced-new","refresh_token":"rotated","expires_in":3600}`)
+	defer ts.Close()
+
+	got, err := oauth.Refresh(oauth.Config{CredentialsPath: path, TokenURL: ts.URL}, ts.Client(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "forced-new" {
+		t.Fatalf("Refresh() token = %q, want forced-new", got)
+	}
+	updated, err := oauth.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.AccessToken != "forced-new" || updated.RefreshToken != "rotated" {
+		t.Fatalf("updated credentials = %+v, want rotated token pair", updated)
+	}
+}
+
+func TestToken_RefreshResponseWithoutAccessTokenLeavesCredentialsUnchanged(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Unix(1700000000, 0)
+	original := buildDoc(t, "old", "ref", now.Add(time.Minute).UnixMilli())
+	path := writeCredentials(t, dir, original)
+
+	var captured *http.Request
+	ts := refreshServer(t, &captured, http.StatusOK, `{"expires_in":3600}`)
+	defer ts.Close()
+
+	_, err := oauth.Token(oauth.Config{CredentialsPath: path, TokenURL: ts.URL}, ts.Client(), now)
+	if err == nil {
+		t.Fatal("Token() error = nil, want malformed refresh response error")
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != original {
+		t.Fatal("credentials changed after refresh response without access_token")
 	}
 }
 

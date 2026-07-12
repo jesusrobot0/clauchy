@@ -119,7 +119,10 @@ func runWaybar() {
 	}
 
 	// TokenFunc re-samples time.Now() on every call (clock seam invariant).
-	tokenFunc := func() (string, error) {
+	tokenFunc := func(forceRefresh bool) (string, error) {
+		if forceRefresh {
+			return oauth.Refresh(oauthCfg, oauthClient, time.Now())
+		}
 		return oauth.Token(oauthCfg, oauthClient, time.Now())
 	}
 
@@ -202,7 +205,10 @@ func runDashboard(colorful bool) {
 		TokenURL:        "https://platform.claude.com/v1/oauth/token",
 	}
 
-	tokenFunc := func() (string, error) {
+	tokenFunc := func(forceRefresh bool) (string, error) {
+		if forceRefresh {
+			return oauth.Refresh(oauthCfg, oauthClient, time.Now())
+		}
 		return oauth.Token(oauthCfg, oauthClient, time.Now())
 	}
 

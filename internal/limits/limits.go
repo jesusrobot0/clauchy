@@ -42,11 +42,17 @@ var (
 	// ErrTransient is returned by Fetch when the network or server is
 	// temporarily unavailable (HTTP 5xx, context deadline, network error).
 	ErrTransient = errors.New("limits: transient error")
+
+	// ErrUnauthorized is returned when the usage endpoint rejects the bearer
+	// token. Cached handles it by forcing one refresh and retrying once.
+	ErrUnauthorized = errors.New("limits: unauthorized")
 )
 
 // FetchTimeout is the maximum time a single Fetch call may take.
 // Cached wraps the context with this deadline before calling Fetch.
 const FetchTimeout = 2500 * time.Millisecond
+
+const maxUsageResponseBytes = 2 << 20
 
 // staleCeiling is the maximum age of stale data that can be served.
 const staleCeiling = 7 * 24 * time.Hour
@@ -62,9 +68,9 @@ const lockTimeout = 3 * time.Second
 // DefaultLockTimeout is the production lock timeout exported for tests.
 const DefaultLockTimeout = lockTimeout
 
-// TokenFunc is the injectable token provider. main binds oauth.Token into
-// a closure of this type, keeping limits decoupled from oauth.
-type TokenFunc func() (string, error)
+// TokenFunc is the injectable token provider. forceRefresh is true only after
+// the usage endpoint rejects an otherwise valid bearer token.
+type TokenFunc func(forceRefresh bool) (string, error)
 
 // Window represents a usage window returned by the API.
 type Window struct {
@@ -194,13 +200,19 @@ func Fetch(ctx context.Context, h *http.Client, token, baseURL string) (Usage, e
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return Usage{}, fmt.Errorf("%w: status %d", ErrUnauthorized, resp.StatusCode)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return Usage{}, fmt.Errorf("%w: status %d", ErrTransient, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUsageResponseBytes+1))
 	if err != nil {
 		return Usage{}, fmt.Errorf("%w: read body: %v", ErrTransient, err)
+	}
+	if len(body) > maxUsageResponseBytes {
+		return Usage{}, fmt.Errorf("%w: response exceeds %d bytes", ErrTransient, maxUsageResponseBytes)
 	}
 
 	var apiResp apiResponse
@@ -254,7 +266,7 @@ func Cached(
 	payload, cacheErr := readCachePayload(c)
 	if cacheErr == nil {
 		age := currentNow.Sub(payload.CachedAt)
-		if age < cacheTTL {
+		if age >= 0 && age < cacheTTL {
 			return toUsageFromCache(payload, false), nil
 		}
 	}
@@ -263,7 +275,7 @@ func Cached(
 	var stalePayload *cachePayload
 	if cacheErr == nil {
 		age := currentNow.Sub(payload.CachedAt)
-		if age <= staleCeiling {
+		if age >= 0 && age <= staleCeiling {
 			cp := payload // copy
 			stalePayload = &cp
 		}
@@ -278,20 +290,20 @@ func Cached(
 		payload2, cacheErr2 := readCachePayload(c)
 		if cacheErr2 == nil {
 			age2 := now().Sub(payload2.CachedAt)
-			if age2 < cacheTTL {
+			if age2 >= 0 && age2 < cacheTTL {
 				result = toUsageFromCache(payload2, false)
 				return nil // winner's data — skip fetch
 			}
 			// Update stale fallback from double-check (may be newer).
 			age2abs := now().Sub(payload2.CachedAt)
-			if age2abs <= staleCeiling {
+			if age2abs >= 0 && age2abs <= staleCeiling {
 				cp2 := payload2
 				stalePayload = &cp2
 			}
 		}
 
 		// 3b. Get access token.
-		tokStr, tokErr := tok()
+		tokStr, tokErr := tok(false)
 		if tokErr != nil {
 			// ErrNoCredentials and ErrInvalidCredentials must ALWAYS propagate
 			// immediately — never masked by stale data. These mean "no/broken
@@ -318,11 +330,33 @@ func Cached(
 			return tokErr
 		}
 
-		// 3c. Fetch with bounded deadline.
-		fCtx, cancel := context.WithTimeout(ctx, FetchTimeout)
-		defer cancel()
+		// 3c. Fetch with a fresh bounded deadline for each attempt. A forced OAuth
+		// refresh may consume time, so the retry must not reuse the first deadline.
+		fetchUsage := func(token string) (Usage, error) {
+			fCtx, cancel := context.WithTimeout(ctx, FetchTimeout)
+			defer cancel()
+			return Fetch(fCtx, h, token, baseURL)
+		}
 
-		u, fetchErr := Fetch(fCtx, h, tokStr, baseURL)
+		u, fetchErr := fetchUsage(tokStr)
+		if errors.Is(fetchErr, ErrUnauthorized) {
+			refreshedToken, refreshErr := tok(true)
+			if refreshErr != nil {
+				if stalePayload != nil {
+					result = toUsageFromCache(*stalePayload, true)
+					return nil
+				}
+				return refreshErr
+			}
+			u, fetchErr = fetchUsage(refreshedToken)
+			if errors.Is(fetchErr, ErrUnauthorized) {
+				if stalePayload != nil {
+					result = toUsageFromCache(*stalePayload, true)
+					return nil
+				}
+				return fmt.Errorf("%w: usage endpoint rejected refreshed token", oauth.ErrRefreshRejected)
+			}
+		}
 		if fetchErr != nil {
 			if stalePayload != nil {
 				result = toUsageFromCache(*stalePayload, true)
