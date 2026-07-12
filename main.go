@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -62,28 +63,56 @@ var version = "dev"
 //
 // Recognized modes: "dashboard" (default), "waybar", "install", "version".
 // The --colorful flag may appear anywhere in the args slice.
-func parseArgs(args []string) (mode string, colorful bool) {
+func parseArgs(args []string) (mode string, colorful bool, err error) {
 	mode = "dashboard"
+	modeSet := false
 	for _, a := range args {
 		switch a {
 		case "--colorful":
 			colorful = true
 		case "waybar":
+			if modeSet {
+				return "", false, fmt.Errorf("multiple modes provided")
+			}
 			mode = "waybar"
+			modeSet = true
 		case "install":
+			if modeSet {
+				return "", false, fmt.Errorf("multiple modes provided")
+			}
 			mode = "install"
+			modeSet = true
 		case "--version":
+			if modeSet {
+				return "", false, fmt.Errorf("multiple modes provided")
+			}
 			mode = "version"
+			modeSet = true
+		case "--help", "-h":
+			if modeSet {
+				return "", false, fmt.Errorf("multiple modes provided")
+			}
+			mode = "help"
+			modeSet = true
+		default:
+			return "", false, fmt.Errorf("unknown argument %q", a)
 		}
 	}
 	return
 }
 
 func main() {
-	mode, colorful := parseArgs(os.Args[1:])
+	mode, colorful, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "clauchy: %v\n\n", err)
+		printUsage(os.Stderr)
+		os.Exit(2)
+	}
 	switch mode {
 	case "version":
-		fmt.Println("clauchy " + version)
+		fmt.Println("clauchy " + resolvedVersion(version, debug.ReadBuildInfo))
+	case "help":
+		printUsage(os.Stdout)
 	case "waybar":
 		runWaybar()
 	case "install":
@@ -91,6 +120,27 @@ func main() {
 	default:
 		runDashboard(colorful)
 	}
+}
+
+func printUsage(w interface{ Write([]byte) (int, error) }) {
+	fmt.Fprint(w, `Usage:
+  clauchy                 Open the dashboard
+  clauchy --colorful      Open the colorful dashboard
+  clauchy waybar          Emit one Waybar JSON payload
+  clauchy install         Install or repair the Omarchy integration
+  clauchy install --colorful
+  clauchy --version
+`)
+}
+
+func resolvedVersion(linked string, readBuildInfo func() (*debug.BuildInfo, bool)) string {
+	if linked != "" && linked != "dev" {
+		return linked
+	}
+	if info, ok := readBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
 }
 
 // ─── Waybar mode ─────────────────────────────────────────────────────────────
