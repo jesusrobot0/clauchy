@@ -1,0 +1,43 @@
+version: 2
+
+before:
+  hooks:
+    - go mod verify
+    - go mod tidy -diff
+    - go vet ./...
+    - sh -c 'TZ=UTC go test -count=1 ./...'
+    - sh -c 'TZ=America/Mexico_City go test -count=1 ./...'
+    - go test -race -count=1 ./...
+
+builds:
+  - id: clauchy
+    main: .
+    binary: clauchy
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
