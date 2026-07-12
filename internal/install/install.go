@@ -905,23 +905,133 @@ func appendCSSBlockContent(src []byte, block string) []byte {
 // nonClobberingBackup copies path to path.bak.<epoch>[.N], incrementing the
 // numeric suffix until an unused name is found.
 func nonClobberingBackup(path string) (string, error) {
-	epoch := time.Now().Unix()
-	base := fmt.Sprintf("%s.bak.%d", path, epoch)
-	dest := base
-	for n := 1; ; n++ {
-		if _, err := os.Stat(dest); os.IsNotExist(err) {
-			break
-		}
-		dest = fmt.Sprintf("%s.%d", base, n)
-	}
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("backup read %s: %w", path, err)
 	}
-	if err := os.WriteFile(dest, src, 0o644); err != nil {
-		return "", fmt.Errorf("backup write %s: %w", dest, err)
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("backup stat %s: %w", path, err)
 	}
-	return dest, nil
+
+	epoch := time.Now().Unix()
+	base := fmt.Sprintf("%s.bak.%d", path, epoch)
+	for n := 1; ; n++ {
+		dest := base
+		if n > 1 {
+			dest = fmt.Sprintf("%s.%d", base, n-1)
+		}
+		f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("backup create %s: %w", dest, err)
+		}
+		if _, err := f.Write(src); err != nil {
+			f.Close()
+			os.Remove(dest)
+			return "", fmt.Errorf("backup write %s: %w", dest, err)
+		}
+		if err := f.Sync(); err != nil {
+			f.Close()
+			os.Remove(dest)
+			return "", fmt.Errorf("backup sync %s: %w", dest, err)
+		}
+		if err := f.Close(); err != nil {
+			os.Remove(dest)
+			return "", fmt.Errorf("backup close %s: %w", dest, err)
+		}
+		return dest, nil
+	}
+}
+
+type plannedWrite struct {
+	kind    string
+	path    string
+	before  []byte
+	after   []byte
+	existed bool
+	mode    os.FileMode
+}
+
+func atomicReplace(path string, data []byte, mode os.FileMode) (bool, error) {
+	if mode == 0 {
+		mode = 0o644
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".clauchy-tmp-*")
+	if err != nil {
+		return false, err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		tmp.Close()
+		os.Remove(tmpName)
+	}
+	if err := tmp.Chmod(mode.Perm()); err != nil {
+		cleanup()
+		return false, err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		cleanup()
+		return false, err
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return false, err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return false, err
+	}
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return true, err
+	}
+	defer dirFile.Close()
+	if err := dirFile.Sync(); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func rollbackWrites(applied []plannedWrite) error {
+	var rollbackErr error
+	for i := len(applied) - 1; i >= 0; i-- {
+		w := applied[i]
+		var err error
+		if w.existed {
+			_, err = atomicReplace(w.path, w.before, w.mode)
+		} else {
+			err = os.Remove(w.path)
+			if errors.Is(err, os.ErrNotExist) {
+				err = nil
+			}
+		}
+		if err != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore %s: %w", w.path, err))
+		}
+	}
+	return rollbackErr
+}
+
+func resolvedWritePath(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return path, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return path, nil
+	}
+	return filepath.EvalSymlinks(path)
 }
 
 // ─── Run ──────────────────────────────────────────────────────────────────────
@@ -944,6 +1054,9 @@ func nonClobberingBackup(path string) (string, error) {
 // regenerated; HyprChanged/ConfigChanged/CSSChanged remain false).
 func Run(cfg RunConfig) (Result, error) {
 	var res Result
+	if cfg.Reload == nil {
+		cfg.Reload = func() error { return nil }
+	}
 
 	// ── Read config ──────────────────────────────────────────────────────────
 	configSrc, err := os.ReadFile(cfg.ConfigPath)
@@ -1030,15 +1143,15 @@ func Run(cfg RunConfig) (Result, error) {
 	condE := hasMarkerBlock(cssSrc) &&
 		extractCSSBlock(cssSrc) == strings.TrimRight(buildCSSBlock(iconDir), "\n")
 
-	// ── Hyprland ─────────────────────────────────────────────────────────────
-	// Read hyprland.conf when a path is provided.
-	// Missing file → warning + skip. Empty path → skip silently.
-	if err := runHyprland(cfg, &res); err != nil {
+	// Plan Hyprland before writing anything so all user-file changes can be
+	// backed up and applied as one transaction.
+	hyprWrite, err := planHyprland(cfg, &res)
+	if err != nil {
 		return Result{}, err
 	}
 
 	// ── Full no-op for Waybar config + CSS? ──────────────────────────────────
-	if condA && condB && condC && condD && condE {
+	if condA && condB && condC && condD && condE && hyprWrite == nil {
 		// Set OnClickResolved based on the existing config state
 		res.OnClickResolved = sc.clauchy.onClick != "" && terminalFromOnClick(sc.clauchy.onClick) != ""
 		return res, nil
@@ -1070,30 +1183,26 @@ func Run(cfg RunConfig) (Result, error) {
 		}
 	}
 
-	// ── Apply config edits ────────────────────────────────────────────────────
-	if len(configEdits) > 0 {
-		bk, err := nonClobberingBackup(cfg.ConfigPath)
-		if err != nil {
-			return Result{}, fmt.Errorf("config backup: %w", err)
-		}
-		res.Backups = append(res.Backups, bk)
+	var writes []plannedWrite
 
-		newSrc := applyEdits(configSrc, configEdits)
-		if err := os.WriteFile(cfg.ConfigPath, newSrc, 0o644); err != nil {
-			return Result{}, fmt.Errorf("writing config: %w", err)
+	// ── Plan config write ─────────────────────────────────────────────────────
+	if len(configEdits) > 0 {
+		writePath, err := resolvedWritePath(cfg.ConfigPath)
+		if err != nil {
+			return Result{}, fmt.Errorf("resolve config path: %w", err)
 		}
-		res.ConfigChanged = true
+		info, err := os.Stat(writePath)
+		if err != nil {
+			return Result{}, fmt.Errorf("stat config: %w", err)
+		}
+		writes = append(writes, plannedWrite{
+			kind: "config", path: writePath, before: configSrc,
+			after: applyEdits(configSrc, configEdits), existed: true, mode: info.Mode(),
+		})
 	}
 
-	// ── CSS ───────────────────────────────────────────────────────────────────
+	// ── Plan CSS write ────────────────────────────────────────────────────────
 	if !condE {
-		if len(cssSrc) > 0 || cssErr == nil {
-			bk, err := nonClobberingBackup(cfg.StylePath)
-			if err != nil {
-				return Result{}, fmt.Errorf("css backup: %w", err)
-			}
-			res.Backups = append(res.Backups, bk)
-		}
 		cssBlock := buildCSSBlock(iconDir)
 		var newCSSSrc []byte
 		if hasMarkerBlock(cssSrc) {
@@ -1101,14 +1210,68 @@ func Run(cfg RunConfig) (Result, error) {
 		} else {
 			newCSSSrc = appendCSSBlockContent(cssSrc, cssBlock)
 		}
-		if err := os.WriteFile(cfg.StylePath, newCSSSrc, 0o644); err != nil {
-			return Result{}, fmt.Errorf("writing css: %w", err)
+		mode := os.FileMode(0o644)
+		existed := cssErr == nil
+		writePath := cfg.StylePath
+		if existed {
+			writePath, err = resolvedWritePath(cfg.StylePath)
+			if err != nil {
+				return Result{}, fmt.Errorf("resolve css path: %w", err)
+			}
+			info, err := os.Stat(writePath)
+			if err != nil {
+				return Result{}, fmt.Errorf("stat css: %w", err)
+			}
+			mode = info.Mode()
 		}
-		res.CSSChanged = true
+		writes = append(writes, plannedWrite{
+			kind: "css", path: writePath, before: cssSrc,
+			after: newCSSSrc, existed: existed, mode: mode,
+		})
+	}
+	if hyprWrite != nil {
+		writes = append(writes, *hyprWrite)
+	}
+
+	// Create every backup before the first mutation. A backup failure therefore
+	// leaves all user configuration untouched.
+	for _, w := range writes {
+		if !w.existed {
+			continue
+		}
+		bk, err := nonClobberingBackup(w.path)
+		if err != nil {
+			return Result{}, fmt.Errorf("%s backup: %w", w.kind, err)
+		}
+		res.Backups = append(res.Backups, bk)
+	}
+
+	var applied []plannedWrite
+	for _, w := range writes {
+		committed, err := atomicReplace(w.path, w.after, w.mode)
+		if err != nil {
+			if committed {
+				applied = append(applied, w)
+			}
+			rollbackErr := rollbackWrites(applied)
+			if rollbackErr != nil {
+				return Result{}, fmt.Errorf("writing %s: %w; rollback failed: %v", w.kind, err, rollbackErr)
+			}
+			return Result{}, fmt.Errorf("writing %s: %w", w.kind, err)
+		}
+		applied = append(applied, w)
+		switch w.kind {
+		case "config":
+			res.ConfigChanged = true
+		case "css":
+			res.CSSChanged = true
+		case "hyprland":
+			res.HyprChanged = true
+		}
 	}
 
 	// ── Reload ────────────────────────────────────────────────────────────────
-	if res.ConfigChanged || res.CSSChanged {
+	if res.ConfigChanged || res.CSSChanged || res.HyprChanged {
 		if err := cfg.Reload(); err != nil {
 			res.Warnings = append(res.Warnings, "reload failed: "+err.Error())
 		}
@@ -1131,9 +1294,9 @@ func Run(cfg RunConfig) (Result, error) {
 // runHyprland handles the Hyprland window rules surface.
 // It is called from Run and mutates res in place.
 // Returns non-nil only for fatal errors; a missing file is a warning, not fatal.
-func runHyprland(cfg RunConfig, res *Result) error {
+func planHyprland(cfg RunConfig, res *Result) (*plannedWrite, error) {
 	if cfg.HyprlandConf == "" {
-		return nil // non-Hyprland setup — skip silently
+		return nil, nil // non-Hyprland setup — skip silently
 	}
 
 	hyprSrc, err := os.ReadFile(cfg.HyprlandConf)
@@ -1141,21 +1304,22 @@ func runHyprland(cfg RunConfig, res *Result) error {
 		if os.IsNotExist(err) {
 			res.Warnings = append(res.Warnings,
 				"hyprland.conf not found ("+cfg.HyprlandConf+"); skipping Hyprland window rules (non-Hyprland setup)")
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("reading hyprland.conf: %w", err)
+		return nil, fmt.Errorf("reading hyprland.conf: %w", err)
 	}
 
 	if hyprBlockUpToDate(hyprSrc) {
-		return nil // already installed with current content — true no-op
+		return nil, nil // already installed with current content — true no-op
 	}
-
-	// Backup then write (append or replace-in-place when block exists but stale).
-	bk, err := nonClobberingBackup(cfg.HyprlandConf)
+	writePath, err := resolvedWritePath(cfg.HyprlandConf)
 	if err != nil {
-		return fmt.Errorf("hyprland backup: %w", err)
+		return nil, fmt.Errorf("resolve hyprland.conf path: %w", err)
 	}
-	res.Backups = append(res.Backups, bk)
+	info, err := os.Stat(writePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat hyprland.conf: %w", err)
+	}
 
 	var newSrc []byte
 	if hasHyprBlock(hyprSrc) {
@@ -1165,15 +1329,8 @@ func runHyprland(cfg RunConfig, res *Result) error {
 		// No block yet — append.
 		newSrc = appendHyprBlock(hyprSrc)
 	}
-	if err := os.WriteFile(cfg.HyprlandConf, newSrc, 0o644); err != nil {
-		return fmt.Errorf("writing hyprland.conf: %w", err)
-	}
-	res.HyprChanged = true
-
-	// Reload via the provided Reloader (hyprctl reload injected by main; no-op in tests).
-	if err := cfg.Reload(); err != nil {
-		res.Warnings = append(res.Warnings, "hyprland reload failed: "+err.Error())
-	}
-
-	return nil
+	return &plannedWrite{
+		kind: "hyprland", path: writePath, before: hyprSrc,
+		after: newSrc, existed: true, mode: info.Mode(),
+	}, nil
 }

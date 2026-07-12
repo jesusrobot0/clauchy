@@ -29,6 +29,85 @@ func runTestInstall(configPath, stylePath string, reload install.Reloader) (inst
 	})
 }
 
+func TestRun_RollsBackConfigWhenLaterWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	configPath := copyFixture(t, dir, "config_fresh.jsonc")
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stylePath := filepath.Join(dir, "missing-parent", "style.css")
+
+	_, err = runTestInstall(configPath, stylePath, noopReloader)
+	if err == nil {
+		t.Fatal("Run() error = nil, want CSS write failure")
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(after, original) {
+		t.Fatal("config.jsonc was not rolled back after CSS write failure")
+	}
+}
+
+func TestRun_BackupPreservesSourcePermissions(t *testing.T) {
+	dir := t.TempDir()
+	configPath := copyFixture(t, dir, "config_fresh.jsonc")
+	stylePath := copyFixture(t, dir, "style_fresh.css")
+	if err := os.Chmod(configPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := runTestInstall(configPath, stylePath, noopReloader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, backup := range res.Backups {
+		if !strings.HasPrefix(backup, configPath+".bak.") {
+			continue
+		}
+		info, statErr := os.Stat(backup)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("config backup mode = %o, want 600", got)
+		}
+		return
+	}
+	t.Fatal("config backup not found")
+}
+
+func TestRun_PreservesSymlinkedConfig(t *testing.T) {
+	dir := t.TempDir()
+	targetDir := t.TempDir()
+	target := copyFixture(t, targetDir, "config_fresh.jsonc")
+	configLink := filepath.Join(dir, "config.jsonc")
+	if err := os.Symlink(target, configLink); err != nil {
+		t.Fatal(err)
+	}
+	stylePath := copyFixture(t, dir, "style_fresh.css")
+
+	if _, err := runTestInstall(configLink, stylePath, noopReloader); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(configLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("config symlink was replaced by a regular file")
+	}
+	updated, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(updated, []byte(`"custom/clauchy"`)) {
+		t.Fatal("symlink target was not updated")
+	}
+}
+
 // copyFixture copies a testdata file into dir, returning its path.
 func copyFixture(t *testing.T, dir, name string) string {
 	t.Helper()
