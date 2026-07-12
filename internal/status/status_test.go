@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -130,6 +131,40 @@ func TestFetch_FullSummary_ParsesCorrectly(t *testing.T) {
 	}
 	if got.Stale {
 		t.Errorf("Stale should be false from Fetch")
+	}
+}
+
+func TestFetch_RejectsOversizedResponse(t *testing.T) {
+	t.Parallel()
+	ts := serveSummary(t, strings.Repeat("x", 3<<20))
+	defer ts.Close()
+
+	_, err := status.Fetch(context.Background(), ts.Client(), ts.URL)
+	if !errors.Is(err, status.ErrTransient) {
+		t.Fatalf("Fetch() error = %v, want ErrTransient", err)
+	}
+}
+
+func TestCached_FutureTimestampForcesFetch(t *testing.T) {
+	t.Parallel()
+	c := cache.New(t.TempDir())
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	if err := c.Write("status.json", buildCachePayload(now.Add(time.Hour), "none", "operational")); err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		fmt.Fprint(w, fullSummary)
+	}))
+	defer ts.Close()
+
+	_, err := cachedFast(context.Background(), c, ts.Client(), ts.URL, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("status requests = %d, want 1", requests)
 	}
 }
 
@@ -695,6 +730,11 @@ func TestHumanLabel_TableDriven(t *testing.T) {
 			name: "component absent → description, no prefix",
 			st:   status.Status{Indicator: "minor", ClaudeCode: "", Description: "Minor Service Outage"},
 			want: "Minor Service Outage",
+		},
+		{
+			name: "remote terminal controls are removed",
+			st:   status.Status{Indicator: "minor", Description: "Outage\x1b]52;c;payload\a\n"},
+			want: "Outage]52;c;payload",
 		},
 	}
 

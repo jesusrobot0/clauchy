@@ -58,6 +58,23 @@ func TestAggregate_EmptyRoots(t *testing.T) {
 	}
 }
 
+func TestAggregate_UsageKeyAllowsJSONWhitespace(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	line := `{"sessionId":"s1","type":"assistant","timestamp":"2026-07-07T12:00:00Z","message":{"id":"m1","type":"message","model":"claude-haiku-4-5","usage" : {"input_tokens":10,"output_tokens":5}}}`
+	if err := os.WriteFile(filepath.Join(dir, "whitespace.jsonl"), []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := transcript.Aggregate([]string{dir}, builtinTable(), fixedNow, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Today.Messages != 1 || stats.Today.InputTokens != 10 {
+		t.Fatalf("stats today = %+v, want one 10-token message", stats.Today)
+	}
+}
+
 func TestAggregate_PricingDatePropagates(t *testing.T) {
 	t.Parallel()
 

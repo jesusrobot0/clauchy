@@ -127,7 +127,7 @@ const DefaultMaxLineSize = 4 * 1024 * 1024
 
 // usageMarker is the byte sequence used by the two-phase scan to detect lines
 // that may carry usage data before attempting a full JSON parse.
-var usageMarker = []byte(`"usage":`)
+var usageMarker = []byte(`"usage"`)
 
 // syntheticModel is the sentinel model name used by Claude Code for local
 // error-placeholder entries that are not real API calls. These entries must be

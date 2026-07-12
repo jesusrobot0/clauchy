@@ -23,9 +23,12 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jesusrobot0/clauchy/internal/cache"
 )
+
+const maxStatusResponseBytes = 2 << 20
 
 // ErrTransient is returned by Fetch (and propagated by Cached) when the
 // network, server, or parse step fails transiently.
@@ -114,9 +117,12 @@ func Fetch(ctx context.Context, h *http.Client, baseURL string) (Status, error) 
 		return Status{}, fmt.Errorf("%w: status %d", ErrTransient, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxStatusResponseBytes+1))
 	if err != nil {
 		return Status{}, fmt.Errorf("%w: read body: %v", ErrTransient, err)
+	}
+	if len(body) > maxStatusResponseBytes {
+		return Status{}, fmt.Errorf("%w: response exceeds %d bytes", ErrTransient, maxStatusResponseBytes)
 	}
 
 	var apiResp apiResponse
@@ -179,7 +185,7 @@ func Cached(
 	payload, cacheErr := readCachePayload(c)
 	if cacheErr == nil {
 		age := currentNow.Sub(payload.CachedAt)
-		if age < cacheTTL {
+		if age >= 0 && age < cacheTTL {
 			return fromCachePayload(payload, false), nil
 		}
 	}
@@ -188,7 +194,7 @@ func Cached(
 	var stalePayload *cachePayload
 	if cacheErr == nil {
 		age := currentNow.Sub(payload.CachedAt)
-		if age <= staleCeiling {
+		if age >= 0 && age <= staleCeiling {
 			cp := payload
 			stalePayload = &cp
 		}
@@ -203,12 +209,12 @@ func Cached(
 		payload2, cacheErr2 := readCachePayload(c)
 		if cacheErr2 == nil {
 			age2 := now().Sub(payload2.CachedAt)
-			if age2 < cacheTTL {
+			if age2 >= 0 && age2 < cacheTTL {
 				result = fromCachePayload(payload2, false)
 				return nil // winner's data — skip fetch
 			}
 			// Update stale fallback from double-check (may be newer).
-			if now().Sub(payload2.CachedAt) <= staleCeiling {
+			if age := now().Sub(payload2.CachedAt); age >= 0 && age <= staleCeiling {
 				cp2 := payload2
 				stalePayload = &cp2
 			}
@@ -375,7 +381,16 @@ func Worst(s Status) string {
 //     with "Claude Code:" would misattribute the incident.
 func HumanLabel(st Status) string {
 	if st.ClaudeCode != "" && st.ClaudeCode != "operational" {
-		return "Claude Code: " + strings.ReplaceAll(st.ClaudeCode, "_", " ")
+		return cleanRemoteText("Claude Code: " + strings.ReplaceAll(st.ClaudeCode, "_", " "))
 	}
-	return st.Description
+	return cleanRemoteText(st.Description)
+}
+
+func cleanRemoteText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
