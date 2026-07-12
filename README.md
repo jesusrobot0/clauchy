@@ -8,7 +8,9 @@ Waybar icon and a full TUI dashboard.
 
 ---
 
-**Requirement**: a Nerd Font patched terminal (default on Omarchy) — needed for the dashboard's rounded progress bar caps (Powerline glyphs U+E0B4/U+E0B6). The Waybar icon is now painted by CSS `background-image` so no Nerd Font glyph is required for the bar itself.
+**Requirements**: Omarchy or another Waybar/Hyprland environment, Claude Code
+logged in, and a Nerd Font patched terminal. Building from source additionally
+requires Go 1.26.4 or newer.
 
 ---
 
@@ -37,9 +39,12 @@ The binary has three modes:
 ## Install
 
 ```bash
-go install clauchy@latest
+go install github.com/jesusrobot0/clauchy@latest
 clauchy install
 ```
+
+Starting with the next release, static Linux binaries for amd64 and arm64 are
+attached to GitHub releases. Verify downloads with `checksums.txt`.
 
 `clauchy install` makes the following changes (all idempotent — safe to run again
 after an upgrade):
@@ -52,8 +57,8 @@ after an upgrade):
 3. Appends a marked CSS block to `~/.config/waybar/style.css` that paints the
    Claude SVG logo via `background-image` in each severity color. The Waybar
    module box emits a single space `" "` so the box exists without a glyph.
-4. Writes four SVG icon variants (recolored for low / mid / high / critical) to
-   `~/.local/share/clauchy/`. These are referenced from the CSS block.
+4. Writes one theme-adaptive `claude-symbolic.svg` to
+   `~/.local/share/clauchy/`. Severity colors are applied by CSS.
 5. On Hyprland: appends a marked block of `windowrule` entries to
    `~/.config/hypr/hyprland.conf` so the dashboard panel opens floating,
    centered, and sized correctly. If `hyprland.conf` does not exist the step is
@@ -94,7 +99,12 @@ clauchy discovers everything from your existing Claude Code setup:
 - Waybar config: `~/.config/waybar/config.jsonc` and `style.css`
 
 No configuration file is required. The only optional file is the pricing
-override.
+override. When an access token expires or is rejected, clauchy uses Claude
+Code's refresh token and atomically updates the shared credentials file. It
+never writes credentials to its cache or logs. Clauchy detects concurrent
+credential changes and adopts the newer token, but no third-party tool can make
+cross-process coordination absolute unless Claude Code participates in the same
+lock; a rejected concurrent refresh degrades to cached data or reauthentication.
 
 ---
 
@@ -117,12 +127,19 @@ rates.
 
 ## Uninstall
 
-Remove the `custom/clauchy` block and the `/* clauchy start */ … /* clauchy end
-*/` CSS section from your Waybar files manually, then delete the binary:
+Remove the generated blocks and local data, then delete the binary:
 
 ```bash
+rm -rf ~/.cache/clauchy ~/.local/share/clauchy
 rm "$(which clauchy)"
 ```
+
+Also remove:
+
+- The `custom/clauchy` object and array entry from Waybar `config.jsonc`.
+- The `/* clauchy start */` through `/* clauchy end */` block from `style.css`.
+- The `# clauchy start` through `# clauchy end` block from `hyprland.conf`.
+- Any `.bak.<epoch>` backups after confirming the active configuration works.
 
 clauchy writes to: `~/.cache/clauchy/` (ephemeral usage cache), the Waybar
 config files it patches during install, `~/.local/share/clauchy/` (SVG icons),
@@ -134,7 +151,9 @@ locations are written.
 ## Building from source
 
 ```bash
-git clone https://github.com/jesusrob/clauchy
+git clone https://github.com/jesusrobot0/clauchy
 cd clauchy
-go build -ldflags "-X main.version=$(git describe --tags)" -o clauchy .
+CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-s -w -X main.version=$(git describe --tags --always)" \
+  -o clauchy .
 ```
